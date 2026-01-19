@@ -1,80 +1,86 @@
--- PHUCMAXskidde.lua
--- Auto Bounty — more aggressive auto-start + verbose logs for debugging (mobile friendly)
--- Replace the file in your repo or run this via loadstring(raw) in your executor.
--- IMPORTANT: This build prints status so you can see it's running. If nothing prints, the script didn't run.
+-- PHUCMAX Auto Bounty (single-file)
+-- Merges features from original skidde modules into one self-contained Auto Bounty script
+-- Mobile friendly, defensive (pcall), Teleport only used for low-HP escape and naive server rejoin (no HTTP)
+-- Usage: paste/run in executor. Configure _G.PHUCMAX_Config before running if desired.
 
 -------------------------------------------------------------------
--- QUICK NOTES
--- 1) This version auto-starts by default and logs every major step to Output.
--- 2) If you still "see nothing", check your executor console for errors or that the script was actually loaded.
--- 3) Edit _G.PHUCMAX_Config at top BEFORE loading to change behavior.
+-- CONFIG (edit before loading if you need different defaults)
 -------------------------------------------------------------------
-
--- CONFIG (edit before loading if needed)
 _G.PHUCMAX_Config = _G.PHUCMAX_Config or {}
 local CFG = _G.PHUCMAX_Config
-CFG.Team                = CFG.Team or "Pirate"
+
+CFG.Team                = CFG.Team or "Pirate"        -- "Pirate" or "Marines"
 CFG.MinLevel            = CFG.MinLevel or 612
 CFG.SafeZoneEnabled     = (CFG.SafeZoneEnabled == nil) and true or CFG.SafeZoneEnabled
-CFG.SafeZoneLeaveHP     = CFG.SafeZoneLeaveHP or 30
-CFG.SafeZoneHealUntil   = CFG.SafeZoneHealUntil or 80
+CFG.LowHPPercent        = CFG.LowHPPercent or 30      -- trigger escape at <= %
+CFG.HealUntilPercent    = CFG.HealUntilPercent or 80  -- resume when >= %
 CFG.FlySpeed            = CFG.FlySpeed or 350
 CFG.SpamInterval        = CFG.SpamInterval or 0.12
 CFG.AutoStart           = (CFG.AutoStart == nil) and true or CFG.AutoStart
 CFG.UIBackgroundImage   = CFG.UIBackgroundImage or "rbxassetid://6023426913"
 CFG.TargetMaxDistance   = CFG.TargetMaxDistance or 1200
-CFG.ServerHopDebounce   = CFG.ServerHopDebounce or 10
-CFG.Debug               = true  -- set false to quiet logs
+CFG.ServerHopDebounce   = CFG.ServerHopDebounce or 12
+CFG.Debug               = (CFG.Debug == nil) and true or CFG.Debug
+CFG.ExcludeFriends      = (CFG.ExcludeFriends == nil) and true or CFG.ExcludeFriends
+CFG.ExcludeCup         = (CFG.ExcludeCup == nil) and true or CFG.ExcludeCup
 
+-------------------------------------------------------------------
+-- HELPERS
+-------------------------------------------------------------------
 local function log(...)
     if CFG.Debug then
-        pcall(function() print("[PHUCMAX AutoBounty]", ...) end)
+        local args = {...}
+        for i=1,#args do args[i] = tostring(args[i]) end
+        pcall(function() print("[PHUCMAX]", table.concat(args, " ")) end)
     end
 end
 
--------------------------------------------------------------------
--- SERVICES & SAFE REMOTES
--------------------------------------------------------------------
-local Players           = game:GetService("Players")
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService        = game:GetService("RunService")
-local TeleportService   = game:GetService("TeleportService")
-local UserInputService  = game:GetService("UserInputService")
-local Workspace         = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local TeleportService = game:GetService("TeleportService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
 
 local LocalPlayer = Players.LocalPlayer
 
 local function safeFindRemotes()
-    local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
-    if not Remotes then
-        local ok, r = pcall(function() return ReplicatedStorage:WaitForChild("Remotes", 5) end)
-        Remotes = ok and r or nil
-    end
-    return Remotes
+    local ok, rem = pcall(function() return ReplicatedStorage:FindFirstChild("Remotes") end)
+    if ok and rem then return rem end
+    return nil
 end
-
 local Remotes = safeFindRemotes()
 local CommF_ = Remotes and Remotes:FindFirstChild("CommF_")
 local CommE  = Remotes and Remotes:FindFirstChild("CommE")
+local Validator2 = Remotes and Remotes:FindFirstChild("Validator2")
 
-local function sInvoke(r, ...)
-    if not r then return false end
-    local ok, res = pcall(function() return r:InvokeServer(...) end)
+local function sInvoke(remote, ...)
+    if not remote then return false, "no_remote" end
+    local ok, res = pcall(function() return remote:InvokeServer(...) end)
     return ok, res
 end
-local function sFire(r, ...)
-    if not r then return false end
-    local ok = pcall(function() r:FireServer(...) end)
+local function sFire(remote, ...)
+    if not remote then return false end
+    local ok = pcall(function() remote:FireServer(...) end)
     return ok
 end
 
--------------------------------------------------------------------
--- BASIC HELPERS
--------------------------------------------------------------------
-local function getCharacter(pl) if not pl then return nil end return pl.Character end
-local function getHumanoid(pl) local c = getCharacter(pl) return c and c:FindFirstChildOfClass("Humanoid") end
-local function getHRP(pl) local c = getCharacter(pl) return c and c:FindFirstChild("HumanoidRootPart") end
-local function isAlive(pl) local h = getHumanoid(pl) return h and h.Health > 0 end
+local function getChar(pl)
+    if not pl then return nil end
+    return pl.Character
+end
+local function getHum(pl)
+    local c = getChar(pl)
+    return c and c:FindFirstChildOfClass("Humanoid")
+end
+local function getHRP(pl)
+    local c = getChar(pl)
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+local function isAlive(pl)
+    local h = getHum(pl)
+    return h and h.Health > 0
+end
 
 local function getPlayerLevel(pl)
     if not pl then return nil end
@@ -94,14 +100,17 @@ local function getPlayerLevel(pl)
 end
 
 local function isFriend(pl)
-    if not pl then return false end
+    if not pl or not LocalPlayer then return false end
     local ok, res = pcall(function() return LocalPlayer:IsFriendsWith(pl.UserId) end)
     return ok and res
 end
 
 local function hasCup(pl)
     if not pl then return false end
-    if pl:FindFirstChild("HasCup") then return pl:FindFirstChild("HasCup").Value end
+    if pl:FindFirstChild("HasCup") then
+        local v = pl:FindFirstChild("HasCup")
+        return v.Value == true
+    end
     if pl.Character and pl.Character:FindFirstChild("Cup") then return true end
     return false
 end
@@ -117,7 +126,9 @@ local function inSafeZone(pl)
     if hrp then
         for _, part in ipairs(Workspace:GetDescendants()) do
             if part:IsA("BasePart") and (part.Name:lower():find("safe") or part.Name:lower():find("zone")) then
-                if (hrp.Position - part.Position).Magnitude <= (part.Size.Magnitude/2 + 6) then return true end
+                if (hrp.Position - part.Position).Magnitude <= (part.Size.Magnitude/2 + 6) then
+                    return true
+                end
             end
         end
     end
@@ -125,20 +136,20 @@ local function inSafeZone(pl)
 end
 
 -------------------------------------------------------------------
--- TARGET SELECTION
+-- TARGET SCAN
 -------------------------------------------------------------------
 local function isValidTarget(pl)
     if not pl or pl == LocalPlayer then return false end
     if not isAlive(pl) then return false end
-    if CFG["Don't attack friends"] and isFriend(pl) then return false end
-    if CFG["Don't attack player have cup"] and hasCup(pl) then return false end
+    if CFG.ExcludeFriends and isFriend(pl) then return false end
+    if CFG.ExcludeCup and hasCup(pl) then return false end
     if CFG.SafeZoneEnabled and inSafeZone(pl) then return false end
     local lvl = getPlayerLevel(pl)
     if lvl and lvl < CFG.MinLevel then return false end
     return true
 end
 
-local function scanClosestTarget()
+local function scanNearest()
     local myHRP = getHRP(LocalPlayer)
     local best, bestd = nil, math.huge
     for _, p in ipairs(Players:GetPlayers()) do
@@ -146,57 +157,58 @@ local function scanClosestTarget()
             local hrp = getHRP(p)
             if hrp and myHRP then
                 local d = (hrp.Position - myHRP.Position).Magnitude
-                if d <= CFG.TargetMaxDistance and d < bestd then bestd = d best = p end
-            elseif hrp then best = p; break end
+                if d <= CFG.TargetMaxDistance and d < bestd then
+                    bestd = d
+                    best = p
+                end
+            elseif hrp then
+                best = p; break
+            end
         end
     end
     return best
 end
 
 -------------------------------------------------------------------
--- ACTIONS: team, pvp, race, buso, ken, equip
+-- PREPARE ACTIONS (team, race, pvp, buso, ken, equip)
 -------------------------------------------------------------------
-local lastTeamTick, lastPvPTick = 0, 0
-local function autoSelectTeam()
-    if tick() - lastTeamTick < 3 then return end
-    lastTeamTick = tick()
-    log("Attempting SelectTeam:", CFG.Team)
+local function autoSelectTeamOnce()
     if CommF_ then
         pcall(function() CommF_:InvokeServer("SetTeam", CFG.Team) end)
+        log("Auto SelectTeam invoked:", CFG.Team)
     end
 end
 
+local lastPvP = 0
 local function ensurePvP()
-    if tick() - lastPvPTick < 2 then return end
-    lastPvPTick = tick()
+    if tick() - lastPvP < 2 then return end
+    lastPvP = tick()
     pcall(function()
-        local ok, gui = pcall(function() return LocalPlayer.PlayerGui and LocalPlayer.PlayerGui:FindFirstChild("Main") end)
-        if ok and gui and gui:FindFirstChild("PvpDisabled") and gui.PvpDisabled.Visible == true then
-            log("PvP appears disabled, invoking EnablePvp")
+        local main = LocalPlayer.PlayerGui and LocalPlayer.PlayerGui:FindFirstChild("Main")
+        if main and main:FindFirstChild("PvpDisabled") and main.PvpDisabled.Visible == true then
             if CommF_ then CommF_:InvokeServer("EnablePvp") end
         else
-            log("Trying to ensure PvP anyway")
             if CommF_ then CommF_:InvokeServer("EnablePvp") end
         end
     end)
+    log("Ensure PvP called")
 end
 
-local function ensureRaceV3V4()
-    pcall(function()
-        if CommF_ then CommF_:InvokeServer("RaceV3") end
-        if CommF_ then CommF_:InvokeServer("RaceV4") end
-    end)
-    log("Race V3/V4 trigger attempted")
+local function ensureRaces()
+    if CommF_ then
+        pcall(function() CommF_:InvokeServer("RaceV3") end)
+        pcall(function() CommF_:InvokeServer("RaceV4") end)
+    end
+    -- also attempt Mobile fallback for V4 not used (VM may not exist on mobile)
+    log("RaceV3/V4 attempted")
 end
 
 local function ensureBuso()
     if CommF_ then pcall(function() CommF_:InvokeServer("Buso") end) end
-    log("Buso attempted")
 end
 
 local function ensureKen()
     if CommE then pcall(function() CommE:FireServer("Ken", true) end) end
-    -- try set mobile context button
     pcall(function()
         local gui = LocalPlayer:FindFirstChild("PlayerGui")
         if gui and gui.MobileContextButtons then
@@ -207,19 +219,18 @@ local function ensureKen()
             end
         end
     end)
-    log("Ken attempted")
 end
 
-local function equipFirstMelee()
+local function equipDefaultMelee()
     local char = LocalPlayer.Character
     local backpack = LocalPlayer:FindFirstChild("Backpack")
-    local candidates = {}
-    if char then for _,c in ipairs(char:GetChildren()) do if c:IsA("Tool") then table.insert(candidates,c) end end end
-    if backpack then for _,c in ipairs(backpack:GetChildren()) do if c:IsA("Tool") then table.insert(candidates,c) end end end
-    for _,t in ipairs(candidates) do
+    local list = {}
+    if char then for _, v in ipairs(char:GetChildren()) do if v:IsA("Tool") then table.insert(list, v) end end end
+    if backpack then for _, v in ipairs(backpack:GetChildren()) do if v:IsA("Tool") then table.insert(list, v) end end end
+    for _,t in ipairs(list) do
         local tip = tostring(t.ToolTip or ""):lower()
         local name = tostring(t.Name or ""):lower()
-        if tip:find("melee") or tip:find("sword") or name:find("melee") or name:find("sword") then
+        if tip:find("melee") or tip:find("fist") or tip:find("blade") or name:find("melee") or name:find("sword") then
             pcall(function()
                 if t.Parent ~= char then t.Parent = char end
                 local hum = char:FindFirstChildOfClass("Humanoid")
@@ -229,21 +240,21 @@ local function equipFirstMelee()
             return t
         end
     end
-    if candidates[1] then
+    if list[1] then
         pcall(function()
-            if candidates[1].Parent ~= char then candidates[1].Parent = char end
+            if list[1].Parent ~= char then list[1].Parent = char end
             local hum = char:FindFirstChildOfClass("Humanoid")
-            if hum then hum:EquipTool(candidates[1]) end
+            if hum then hum:EquipTool(list[1]) end
         end)
-        log("Equipped fallback tool:", candidates[1].Name)
-        return candidates[1]
+        log("Equipped fallback tool:", list[1].Name)
+        return list[1]
     end
     log("No tool to equip")
     return nil
 end
 
 -------------------------------------------------------------------
--- MOVEMENT & NoClip
+-- MOVEMENT: NoClip + fly (non-teleport)
 -------------------------------------------------------------------
 local noclipConn = nil
 local function setNoClip(enable)
@@ -278,21 +289,22 @@ local function flyTo(pos, speed)
     if not hrp then return end
     speed = speed or CFG.FlySpeed
     local goal = CFrame.new(pos) * CFrame.new(0, 3, 0)
-    local t = math.clamp((speed / 1500), 0.02, 0.65)
+    local t = math.clamp((speed/1500), 0.02, 0.65)
     pcall(function() hrp.CFrame = hrp.CFrame:Lerp(goal, t) end)
     pcall(function() hrp.CFrame = CFrame.new(hrp.Position, pos) end)
 end
 
 -------------------------------------------------------------------
--- SKILL SPAM & TOOL CYCLE
+-- COMBAT: spam skills & cycle tools
 -------------------------------------------------------------------
-local lastSpam = 0
-local function spamAllSkillsOn(target)
+local lastSpamTime = 0
+local function spamSkillsOn(target)
     if not target or not target.Character then return end
-    if tick() - lastSpam < CFG.SpamInterval then return end
-    lastSpam = tick()
-    local pos = nil
+    if tick() - lastSpamTime < CFG.SpamInterval then return end
+    lastSpamTime = tick()
+    local pos
     pcall(function() local hrp = target.Character:FindFirstChild("HumanoidRootPart"); if hrp then pos = hrp.Position end end)
+    -- call commonly used remote payloads (best-effort)
     if CommE then
         pcall(function()
             CommE:FireServer("Z", pos)
@@ -316,12 +328,12 @@ local function cycleTools()
     local char = LocalPlayer.Character
     if not char then return nil end
     local backpack = LocalPlayer:FindFirstChild("Backpack")
-    local list = {}
-    if char then for _,v in ipairs(char:GetChildren()) do if v:IsA("Tool") then table.insert(list,v) end end end
-    if backpack then for _,v in ipairs(backpack:GetChildren()) do if v:IsA("Tool") then table.insert(list,v) end end end
+    local candidates = {}
+    if char then for _, t in ipairs(char:GetChildren()) do if t:IsA("Tool") then table.insert(candidates,t) end end end
+    if backpack then for _, t in ipairs(backpack:GetChildren()) do if t:IsA("Tool") then table.insert(candidates,t) end end end
     local order = {"melee","sword","fruit","gun"}
-    for _,kw in ipairs(order) do
-        for _,tool in ipairs(list) do
+    for _, kw in ipairs(order) do
+        for _, tool in ipairs(candidates) do
             local tip = tostring(tool.ToolTip or ""):lower()
             local name = tostring(tool.Name or ""):lower()
             if tip:find(kw) or name:find(kw) then
@@ -334,22 +346,22 @@ local function cycleTools()
             end
         end
     end
-    if list[1] then
+    if candidates[1] then
         pcall(function()
-            if list[1].Parent ~= char then list[1].Parent = char end
+            if candidates[1].Parent ~= char then candidates[1].Parent = char end
             local hum = char:FindFirstChildOfClass("Humanoid")
-            if hum then hum:EquipTool(list[1]) end
+            if hum then hum:EquipTool(candidates[1]) end
         end)
-        return list[1]
+        return candidates[1]
     end
     return nil
 end
 
 -------------------------------------------------------------------
--- LOW-HP ESCAPE (tele permitted ONLY here)
+-- LOW HP ESCAPE (only place teleport allowed)
 -------------------------------------------------------------------
 local function lowHpEscape(oldTarget)
-    log("Low HP detected -> teleport up")
+    log("Low HP: teleporting up")
     pcall(function()
         local char = LocalPlayer.Character
         if not char then return end
@@ -357,12 +369,13 @@ local function lowHpEscape(oldTarget)
         if hrp then hrp.CFrame = hrp.CFrame + Vector3.new(0, 1000, 0) end
     end)
     setNoClip(true)
+    -- ascend until healed
     while true do
-        if not running then break end
-        local hum = getHumanoid(LocalPlayer)
+        if not LocalPlayer then break end
+        local hum = getHum(LocalPlayer)
         if hum then
             local perc = (hum.Health / (hum.MaxHealth > 0 and hum.MaxHealth or 1)) * 100
-            if perc >= CFG.SafeZoneHealUntil then break end
+            if perc >= CFG.HealUntilPercent then break end
         end
         pcall(function()
             local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
@@ -370,300 +383,301 @@ local function lowHpEscape(oldTarget)
         end)
         task.wait(0.6)
     end
+    -- teleport down to old target if possible
     if oldTarget and oldTarget.Character and oldTarget.Character:FindFirstChild("HumanoidRootPart") then
         local pos = oldTarget.Character.HumanoidRootPart.Position
         pcall(function()
             local char = LocalPlayer.Character
             if char and char:FindFirstChild("HumanoidRootPart") then
-                char.HumanoidRootPart.CFrame = CFrame.new(pos + Vector3.new(0, 5, 0))
+                char.HumanoidRootPart.CFrame = CFrame.new(pos + Vector3.new(0,5,0))
             end
         end)
     end
-    log("Escape finished, reengaging")
     setNoClip(true)
+    log("Escape complete, reengaging")
 end
 
 -------------------------------------------------------------------
--- SERVER HOP (naive)
+-- SERVER HOP (naive TeleportService hop)
 -------------------------------------------------------------------
 local lastHop = 0
-local function canServerHop()
+local function canHop()
     local ok, pvpDisabled = pcall(function()
-        local gui = LocalPlayer.PlayerGui and LocalPlayer.PlayerGui:FindFirstChild("Main")
-        if gui and gui:FindFirstChild("PvpDisabled") then return gui.PvpDisabled.Visible end
+        local main = LocalPlayer.PlayerGui and LocalPlayer.PlayerGui:FindFirstChild("Main")
+        if main and main:FindFirstChild("PvpDisabled") then return main.PvpDisabled.Visible end
         return true
     end)
     if ok then return pvpDisabled else return true end
 end
+
 local function serverHop()
     if tick() - lastHop < CFG.ServerHopDebounce then return end
-    if not canServerHop() then log("In PvP -> delaying server hop") return end
+    if not canHop() then log("In PvP, delaying hop") return end
     lastHop = tick()
-    log("Server hop triggered (naive Teleport)")
     pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
+    log("Server hop attempted")
 end
 
 -------------------------------------------------------------------
--- MAIN AUTOMATION (aggressive auto-start + logging)
+-- STATE MACHINE / MAIN LOOP
 -------------------------------------------------------------------
 local running = false
-local automationThread = nil
 local currentTarget = nil
 
-local function automationLoop()
-    log("Automation loop started")
-    while running do
-        -- PREPARE
-        autoSelectTeam()
-        ensureRaceV3V4()
-        ensurePvP()
-        ensureBuso()
-        ensureKen()
-        equipFirstMelee()
+local function prepareAll()
+    autoSelectTeamOnce()
+    ensureRaces()
+    ensurePvP()
+    ensureBuso()
+    ensureKen()
+    equipDefaultMelee()
+end
 
-        -- Acquire target
+local function mainLoop()
+    log("AutoBounty main loop started")
+    while running do
+        -- ensure basic preparations often
+        prepareAll()
+
+        -- acquire target if none or invalid
         if not currentTarget or not isValidTarget(currentTarget) then
-            currentTarget = scanClosestTarget()
-            if currentTarget then log("Target acquired:", currentTarget.Name) end
+            currentTarget = scanNearest()
+            if currentTarget then log("Target found:", currentTarget.Name) end
         end
 
         if currentTarget and isValidTarget(currentTarget) then
             -- ENGAGE
-            log("Engaging:", currentTarget.Name)
             setNoClip(true)
-            local hrp = getHRP(currentTarget)
-            if hrp then flyTo(hrp.Position, CFG.FlySpeed) end
+            local trgHRP = getHRP(currentTarget)
+            if trgHRP then flyTo(trgHRP.Position, CFG.FlySpeed) end
 
-            -- COMBAT
-            spamAllSkillsOn(currentTarget)
+            -- keep facing and spam
+            spamSkillsOn(currentTarget)
             cycleTools()
 
-            -- Monitor HP
-            local hum = getHumanoid(LocalPlayer)
-            if hum then
-                local perc = (hum.Health / (hum.MaxHealth > 0 and hum.MaxHealth or 1)) * 100
-                if perc <= CFG.SafeZoneLeaveHP then
-                    log("HP low:", perc, "% -> escaping")
+            -- HP check
+            local myHum = getHum(LocalPlayer)
+            if myHum then
+                local perc = (myHum.Health / (myHum.MaxHealth > 0 and myHum.MaxHealth or 1)) * 100
+                if perc <= CFG.LowHPPercent then
                     lowHpEscape(currentTarget)
                 end
             end
 
-            -- Target dead?
+            -- if target died, reset
             if not isAlive(currentTarget) then
-                log("Target dead:", currentTarget.Name)
+                log("Target died:", currentTarget and currentTarget.Name or "nil")
                 currentTarget = nil
                 setNoClip(false)
                 task.wait(0.6)
             end
         else
-            -- NO TARGET behavior
-            log("No valid target found -> checking server hop")
-            if canServerHop() then
+            -- NO TARGET: server hop if safe
+            log("No target: will check server hop")
+            if canHop() then
                 serverHop()
-                task.wait(3)
+                task.wait(4)
             else
                 task.wait(3)
             end
         end
         task.wait(0.12)
     end
-    log("Automation loop stopped")
+    log("AutoBounty main loop stopped")
     setNoClip(false)
 end
 
 -------------------------------------------------------------------
--- RESPAWN HANDLING
+-- RESPAWN HANDLER
 -------------------------------------------------------------------
 LocalPlayer.CharacterAdded:Connect(function()
-    log("CharacterAdded (respawn) detected")
     task.wait(1)
     if running then
-        ensureRaceV3V4()
-        ensurePvP()
-        ensureBuso()
-        ensureKen()
+        log("Respawn detected: re-preparing and continuing")
+        prepareAll()
         setNoClip(false)
         task.wait(1)
     end
 end)
 
 -------------------------------------------------------------------
--- UI: draggable panel + small square toggle (mobile-friendly)
+-- UI (draggable rectangle + small toggle square)
 -------------------------------------------------------------------
 local function createUI()
-    pcall(function()
-        local screen = Instance.new("ScreenGui")
-        screen.Name = "PHUCMAX_Bounty_UI"
-        screen.ResetOnSpawn = false
-        screen.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    local ok, screen = pcall(function()
+        local sg = Instance.new("ScreenGui")
+        sg.Name = "PHUCMAX_AutoBounty_UI"
+        sg.ResetOnSpawn = false
+        sg.Parent = LocalPlayer:WaitForChild("PlayerGui")
+        return sg
+    end)
+    if not ok then return end
 
-        local panel = Instance.new("Frame")
-        panel.Name = "MainPanel"
-        panel.Size = UDim2.new(0, 360, 0, 150)
-        panel.Position = UDim2.new(0.5, -180, 0.06, 0)
-        panel.AnchorPoint = Vector2.new(0.5, 0)
-        panel.BackgroundColor3 = Color3.fromRGB(22,22,28)
-        panel.BorderSizePixel = 0
-        panel.Parent = screen
-        local corner = Instance.new("UICorner", panel); corner.CornerRadius = UDim.new(0, 10)
+    local sg = screen
 
-        local bg = Instance.new("ImageLabel", panel)
-        bg.Size = UDim2.new(1,0,1,0); bg.Position = UDim2.new(0,0,0,0)
-        bg.Image = CFG.UIBackgroundImage; bg.BackgroundTransparency = 1; bg.ImageTransparency = 0.5; bg.ScaleType = Enum.ScaleType.Crop
+    local panel = Instance.new("Frame")
+    panel.Name = "Panel"
+    panel.Size = UDim2.new(0, 360, 0, 150)
+    panel.Position = UDim2.new(0.5, -180, 0.06, 0)
+    panel.AnchorPoint = Vector2.new(0.5, 0)
+    panel.BackgroundColor3 = Color3.fromRGB(22,22,28)
+    panel.BorderSizePixel = 0
+    panel.Parent = sg
+    local pc = Instance.new("UICorner", panel); pc.CornerRadius = UDim.new(0,8)
 
-        local title = Instance.new("TextLabel", panel)
-        title.Text = "PHUCMAX bounty"; title.Font = Enum.Font.GothamBold; title.TextSize = 20; title.TextColor3 = Color3.new(1,1,1)
-        title.BackgroundTransparency = 1; title.Position = UDim2.new(0.02,0,0.03,0); title.Size = UDim2.new(0.6,0,0.18,0)
-        title.TextXAlignment = Enum.TextXAlignment.Left
+    local bg = Instance.new("ImageLabel", panel)
+    bg.Size = UDim2.new(1,0,1,0); bg.BackgroundTransparency = 1
+    bg.Image = CFG.UIBackgroundImage; bg.ImageTransparency = 0.45; bg.ScaleType = Enum.ScaleType.Crop
 
-        local by = Instance.new("TextLabel", panel)
-        by.Text = "by PHUCMAX"; by.Font = Enum.Font.Gotham; by.TextSize = 12; by.TextColor3 = Color3.fromRGB(200,200,200)
-        by.BackgroundTransparency = 1; by.Position = UDim2.new(0.02,0,0.21,0); by.Size = UDim2.new(0.6,0,0.12,0); by.TextXAlignment = Enum.TextXAlignment.Left
+    local title = Instance.new("TextLabel", panel)
+    title.Text = "PHUCMAX bounty"; title.Font = Enum.Font.GothamBold; title.TextSize = 18
+    title.TextColor3 = Color3.fromRGB(255,255,255); title.BackgroundTransparency = 1
+    title.Position = UDim2.new(0.02,0,0.03,0); title.Size = UDim2.new(0.6,0,0.16,0); title.TextXAlignment = Enum.TextXAlignment.Left
 
-        local timeLabel = Instance.new("TextLabel", panel)
-        timeLabel.Text = os.date("%H:%M:%S"); timeLabel.Font = Enum.Font.Gotham; timeLabel.TextSize = 12
-        timeLabel.TextColor3 = Color3.fromRGB(200,200,200); timeLabel.BackgroundTransparency = 1
-        timeLabel.Position = UDim2.new(0.02,0,0.35,0); timeLabel.Size = UDim2.new(0.6,0,0.12,0)
+    local by = Instance.new("TextLabel", panel)
+    by.Text = "by PHUCMAX"; by.Font = Enum.Font.Gotham; by.TextSize = 12
+    by.TextColor3 = Color3.fromRGB(200,200,200); by.BackgroundTransparency = 1
+    by.Position = UDim2.new(0.02,0,0.19,0); by.Size = UDim2.new(0.6,0,0.12,0)
 
-        local bountyLabel = Instance.new("TextLabel", panel)
-        bountyLabel.Text = "Bounty: --"; bountyLabel.Font = Enum.Font.Gotham; bountyLabel.TextSize = 14
-        bountyLabel.TextColor3 = Color3.fromRGB(255,200,50); bountyLabel.BackgroundTransparency = 1
-        bountyLabel.Position = UDim2.new(0.02,0,0.51,0); bountyLabel.Size = UDim2.new(0.6,0,0.14,0)
-        bountyLabel.TextXAlignment = Enum.TextXAlignment.Left
+    local timeLabel = Instance.new("TextLabel", panel)
+    timeLabel.Text = os.date("%H:%M:%S"); timeLabel.Font = Enum.Font.Gotham; timeLabel.TextSize = 12
+    timeLabel.TextColor3 = Color3.fromRGB(200,200,200); timeLabel.BackgroundTransparency = 1
+    timeLabel.Position = UDim2.new(0.02,0,0.34,0); timeLabel.Size = UDim2.new(0.6,0,0.12,0)
 
-        local function makeBtn(text, x)
-            local b = Instance.new("TextButton", panel)
-            b.Size = UDim2.new(0.3, 0, 0.2, 0)
-            b.Position = UDim2.new(x, 0, 0.72, 0)
-            b.BackgroundColor3 = Color3.fromRGB(45,45,60)
-            b.Text = text; b.Font = Enum.Font.GothamSemibold; b.TextSize = 14; b.TextColor3 = Color3.fromRGB(230,230,230)
-            local c = Instance.new("UICorner", b); c.CornerRadius = UDim.new(0,6)
-            return b
+    local bountyLabel = Instance.new("TextLabel", panel)
+    bountyLabel.Text = "Bounty: --"; bountyLabel.Font = Enum.Font.Gotham; bountyLabel.TextSize = 14
+    bountyLabel.TextColor3 = Color3.fromRGB(255,200,50); bountyLabel.BackgroundTransparency = 1
+    bountyLabel.Position = UDim2.new(0.02,0,0.50,0); bountyLabel.Size = UDim2.new(0.6,0,0.14,0)
+
+    local function makeBtn(text, x)
+        local b = Instance.new("TextButton", panel)
+        b.Size = UDim2.new(0.3, 0, 0.18, 0); b.Position = UDim2.new(x,0,0.72,0)
+        b.BackgroundColor3 = Color3.fromRGB(40,40,55); b.Text = text; b.Font = Enum.Font.GothamSemibold
+        b.TextSize = 13; b.TextColor3 = Color3.fromRGB(230,230,230)
+        local c = Instance.new("UICorner", b); c.CornerRadius = UDim.new(0,6)
+        return b
+    end
+
+    local btnNext = makeBtn("Next Player", 0.02)
+    local btnHop  = makeBtn("Hop Server", 0.36)
+    local btnReset = makeBtn("Reset", 0.70)
+
+    btnNext.MouseButton1Click:Connect(function()
+        currentTarget = nil
+        log("Next Player pressed")
+    end)
+    btnHop.MouseButton1Click:Connect(function()
+        serverHop()
+    end)
+    btnReset.MouseButton1Click:Connect(function()
+        currentTarget = nil
+        setNoClip(false)
+        prepareAll()
+        log("Reset pressed")
+    end)
+
+    -- small toggle square top-left
+    local toggle = Instance.new("Frame", sg)
+    toggle.Size = UDim2.new(0, 40, 0, 40); toggle.Position = UDim2.new(0,8,0,8)
+    toggle.BackgroundColor3 = Color3.fromRGB(35,35,50)
+    local tc = Instance.new("UICorner", toggle); tc.CornerRadius = UDim.new(0,6)
+    local tlabel = Instance.new("TextLabel", toggle)
+    tlabel.Size = UDim2.new(1,0,1,0); tlabel.BackgroundTransparency = 1; tlabel.Text = "UI"; tlabel.Font = Enum.Font.GothamSemibold
+    tlabel.TextColor3 = Color3.fromRGB(230,230,230); tlabel.TextSize = 14
+
+    toggle.InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.Touch or inp.UserInputType == Enum.UserInputType.MouseButton1 then
+            panel.Visible = not panel.Visible
         end
+    end)
 
-        local btnNext  = makeBtn("Next Player", 0.02)
-        local btnHop   = makeBtn("Hop Server", 0.36)
-        local btnReset = makeBtn("Reset", 0.70)
-
-        btnNext.MouseButton1Click:Connect(function() currentTarget = nil; log("Next player pressed") end)
-        btnHop.MouseButton1Click:Connect(function() serverHop(); log("Hop server pressed") end)
-        btnReset.MouseButton1Click:Connect(function()
-            currentTarget = nil; setNoClip(false); ensurePvP(); ensureBuso(); ensureKen(); equipFirstMelee()
-            log("Reset pressed")
-        end)
-
-        local toggle = Instance.new("Frame", screen)
-        toggle.Size = UDim2.new(0,38,0,38); toggle.Position = UDim2.new(0,8,0,8); toggle.BackgroundColor3 = Color3.fromRGB(40,40,55)
-        local tcorner = Instance.new("UICorner", toggle); tcorner.CornerRadius = UDim.new(0,6)
-        local tlabel = Instance.new("TextLabel", toggle); tlabel.Size = UDim2.new(1,0,1,0); tlabel.BackgroundTransparency = 1; tlabel.Text = "UI"; tlabel.Font = Enum.Font.GothamSemibold; tlabel.TextSize = 14; tlabel.TextColor3 = Color3.fromRGB(230,230,230)
-
-        toggle.InputBegan:Connect(function(inp)
-            if inp.UserInputType == Enum.UserInputType.Touch or inp.UserInputType == Enum.UserInputType.MouseButton1 then
-                panel.Visible = not panel.Visible
-            end
-        end)
-
-        -- Draggable helpers (touch + mouse)
-        local function makeDraggable(obj)
-            local dragging, dragInput, dragStart, startPos = false, nil, nil, nil
-            obj.InputBegan:Connect(function(input)
-                if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-                    dragging = true; dragStart = input.Position; startPos = obj.Position
-                    input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end)
-                end
-            end)
-            obj.InputChanged:Connect(function(input)
-                if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-                    dragInput = input
-                end
-            end)
-            UserInputService.InputChanged:Connect(function(input)
-                if input == dragInput and dragging and dragStart and startPos then
-                    local delta = input.Position - dragStart
-                    obj.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-                end
-            end)
-        end
-        makeDraggable(panel); makeDraggable(toggle)
-
-        -- UI update loop
-        spawn(function()
-            while panel.Parent do
-                pcall(function()
-                    timeLabel.Text = os.date("%H:%M:%S")
-                    local ok, val = pcall(function()
-                        local ls = LocalPlayer:FindFirstChild("leaderstats")
-                        if ls then local b = ls:FindFirstChild("Bounty/Honor") or ls:FindFirstChild("Bounty") if b then return tostring(b.Value) end end
-                        return "--"
-                    end)
-                    bountyLabel.Text = "Bounty: "..(ok and val or "--")
+    -- draggable helpers (supports touch & mouse)
+    local function makeDraggable(obj)
+        local dragging, dragInput, dragStart, startPos = false, nil, nil, nil
+        obj.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                dragging = true; dragStart = input.Position; startPos = obj.Position
+                input.Changed:Connect(function()
+                    if input.UserInputState == Enum.UserInputState.End then dragging = false end
                 end)
-                task.wait(1)
             end
         end)
+        obj.InputChanged:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+                dragInput = input
+            end
+        end)
+        UserInputService.InputChanged:Connect(function(input)
+            if input == dragInput and dragging and dragStart and startPos then
+                local delta = input.Position - dragStart
+                obj.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            end
+        end)
+    end
+
+    makeDraggable(panel); makeDraggable(toggle)
+
+    -- update time & bounty
+    spawn(function()
+        while panel.Parent do
+            pcall(function()
+                timeLabel.Text = os.date("%H:%M:%S")
+                local val = "--"
+                pcall(function()
+                    local ls = LocalPlayer:FindFirstChild("leaderstats")
+                    if ls then local b = ls:FindFirstChild("Bounty/Honor") or ls:FindFirstChild("Bounty") if b then val = tostring(b.Value) end end
+                end)
+                bountyLabel.Text = "Bounty: " .. val
+            end)
+            task.wait(1)
+        end
     end)
 end
 
 -------------------------------------------------------------------
--- START / STOP / AUTO-START
+-- START / STOP
 -------------------------------------------------------------------
-local function startAutomation()
-    if running then log("Already running"); return end
-    log("Starting Auto Bounty")
+local automationThread = nil
+function startAutoBounty()
+    if running then log("Already running") return end
     running = true
-    automationThread = task.spawn(automationLoop)
+    automationThread = task.spawn(mainLoop)
+    log("AutoBounty started")
 end
 
-local function stopAutomation()
-    if not running then log("Not running"); return end
+function stopAutoBounty()
+    if not running then log("Not running") return end
     running = false
-    if automationThread then
-        pcall(function() task.cancel(automationThread) end)
-        automationThread = nil
-    end
+    if automationThread then pcall(function() task.cancel(automationThread) end) automationThread = nil end
     setNoClip(false)
-    log("Stopped Auto Bounty")
+    log("AutoBounty stopped")
 end
 
--- global API
 _G.PHUCMAX_AutoBounty = _G.PHUCMAX_AutoBounty or {}
-_G.PHUCMAX_AutoBounty.Start = startAutomation
-_G.PHUCMAX_AutoBounty.Stop  = stopAutomation
+_G.PHUCMAX_AutoBounty.Start = startAutoBounty
+_G.PHUCMAX_AutoBounty.Stop = stopAutoBounty
 _G.PHUCMAX_AutoBounty.IsRunning = function() return running end
 _G.PHUCMAX_AutoBounty.Config = CFG
 
--- create UI (safe)
+-- create UI safely
 pcall(createUI)
 
--- Wait for game load and DataLoaded to ensure remote calls succeed
+-- wait for game ready (DataLoaded) and run initial prepare then auto-start if requested
 task.spawn(function()
-    log("Waiting for game to load and DataLoaded")
+    log("Waiting for game load and DataLoaded")
     repeat task.wait() until game:IsLoaded()
     repeat task.wait() until LocalPlayer:FindFirstChild("DataLoaded")
-    log("Game loaded and DataLoaded detected. Remotes:", (Remotes ~= nil))
-    -- attempt to ensure remotes are found
-    Remotes = safeFindRemotes()
+    -- refresh remotes reference (in case they appeared later)
+    Remotes = safeFindRemotes() or Remotes
     CommF_ = Remotes and Remotes:FindFirstChild("CommF_") or CommF_
     CommE  = Remotes and Remotes:FindFirstChild("CommE") or CommE
-    log("CommF_ present:", CommF_ ~= nil, "CommE present:", CommE ~= nil)
-
-    -- aggressive initial setup to make sure features are ON as soon as possible
-    autoSelectTeam()
-    ensureRaceV3V4()
-    ensurePvP()
-    ensureBuso()
-    ensureKen()
-    equipFirstMelee()
-
-    -- auto-start if configured
+    log("Remotes found:", (Remotes ~= nil), "CommF_:", (CommF_ ~= nil), "CommE:", (CommE ~= nil))
+    prepareAll()
     if CFG.AutoStart then
-        startAutomation()
+        startAutoBounty()
     else
-        log("AutoStart disabled; call _G.PHUCMAX_AutoBounty.Start() to run")
+        log("AutoStart disabled; call _G.PHUCMAX_AutoBounty.Start() to begin")
     end
 end)
 
--- Final log
-log("PHUCMAX AutoBounty script loaded. AutoStart =", tostring(CFG.AutoStart))
-
--- EOF
+log("PHUCMAX Auto Bounty loaded (mobile friendly).")
