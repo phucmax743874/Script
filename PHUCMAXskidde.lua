@@ -1,1337 +1,664 @@
---này là auto bật pvp nè 
-local ToggleEnablePvp = Tabs.Player:AddToggle("ToggleEnablePvp", {Title="Enable PVP", Description="",Default=false })
-ToggleEnablePvp:OnChanged(function(Value)
-  _G.EnabledPvP=Value
-end)
-Options.ToggleEnablePvp:SetValue(false)
-spawn(function()
-  pcall(function()
-      while wait() do
-          if _G.EnabledPvP then
-              if game:GetService("Players").LocalPlayer.PlayerGui.Main.PvpDisabled.Visible==true then
-                  game:GetService("ReplicatedStorage").Remotes.CommF_:InvokeServer("EnablePvp")
-              end
-          end
-      end
-  end)
-end)
+-- PHUCMAXskidde.lua
+-- Auto Bounty — more aggressive auto-start + verbose logs for debugging (mobile friendly)
+-- Replace the file in your repo or run this via loadstring(raw) in your executor.
+-- IMPORTANT: This build prints status so you can see it's running. If nothing prints, the script didn't run.
 
+-------------------------------------------------------------------
+-- QUICK NOTES
+-- 1) This version auto-starts by default and logs every major step to Output.
+-- 2) If you still "see nothing", check your executor console for errors or that the script was actually loaded.
+-- 3) Edit _G.PHUCMAX_Config at top BEFORE loading to change behavior.
+-------------------------------------------------------------------
 
---này là auto bật Haki Quang sát nè 
-local KenModule = {}
+-- CONFIG (edit before loading if needed)
+_G.PHUCMAX_Config = _G.PHUCMAX_Config or {}
+local CFG = _G.PHUCMAX_Config
+CFG.Team                = CFG.Team or "Pirate"
+CFG.MinLevel            = CFG.MinLevel or 612
+CFG.SafeZoneEnabled     = (CFG.SafeZoneEnabled == nil) and true or CFG.SafeZoneEnabled
+CFG.SafeZoneLeaveHP     = CFG.SafeZoneLeaveHP or 30
+CFG.SafeZoneHealUntil   = CFG.SafeZoneHealUntil or 80
+CFG.FlySpeed            = CFG.FlySpeed or 350
+CFG.SpamInterval        = CFG.SpamInterval or 0.12
+CFG.AutoStart           = (CFG.AutoStart == nil) and true or CFG.AutoStart
+CFG.UIBackgroundImage   = CFG.UIBackgroundImage or "rbxassetid://6023426913"
+CFG.TargetMaxDistance   = CFG.TargetMaxDistance or 1200
+CFG.ServerHopDebounce   = CFG.ServerHopDebounce or 10
+CFG.Debug               = true  -- set false to quiet logs
 
-local Players = game:GetService("Players")
+local function log(...)
+    if CFG.Debug then
+        pcall(function() print("[PHUCMAX AutoBounty]", ...) end)
+    end
+end
+
+-------------------------------------------------------------------
+-- SERVICES & SAFE REMOTES
+-------------------------------------------------------------------
+local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local commE = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("CommE")
-local KenEnabled = false
-local autoKenRunning = false
-local player = Players.LocalPlayer
-local function HasTag(tagName)
-    local char = player.Character
-    if not char then return false end   
-    local CollectionService = game:GetService("CollectionService")
-    return CollectionService:HasTag(char, tagName)
+local RunService        = game:GetService("RunService")
+local TeleportService   = game:GetService("TeleportService")
+local UserInputService  = game:GetService("UserInputService")
+local Workspace         = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+
+local function safeFindRemotes()
+    local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    if not Remotes then
+        local ok, r = pcall(function() return ReplicatedStorage:WaitForChild("Remotes", 5) end)
+        Remotes = ok and r or nil
+    end
+    return Remotes
 end
-local function StartKenLoop()
-    if autoKenRunning then return end
-    autoKenRunning = true  
-    task.spawn(function()
-        while KenEnabled do
-            task.wait(0.1) 
-            if HasTag("Ken") then
-                local playerGui = player:FindFirstChild("PlayerGui")
-                if playerGui then
-                    local kenButton = playerGui:FindFirstChild("MobileContextButtons")
-                        and playerGui.MobileContextButtons:FindFirstChild("ContextButtonFrame")
-                        and playerGui.MobileContextButtons.ContextButtonFrame:FindFirstChild("BoundActionKen")                   
-                    if kenButton and kenButton:GetAttribute("Selected") ~= true then
-                        kenButton:SetAttribute("Selected", true)
-                    end
-                end              
-                local success, observationManager = pcall(function()
-                    return getrenv()._G.OM
-                end)               
-                if success and observationManager and not observationManager.active then
-                    observationManager.radius = 0
-                    if type(observationManager.setActive) == "function" then
-                        observationManager:setActive(true)
-                    end
+
+local Remotes = safeFindRemotes()
+local CommF_ = Remotes and Remotes:FindFirstChild("CommF_")
+local CommE  = Remotes and Remotes:FindFirstChild("CommE")
+
+local function sInvoke(r, ...)
+    if not r then return false end
+    local ok, res = pcall(function() return r:InvokeServer(...) end)
+    return ok, res
+end
+local function sFire(r, ...)
+    if not r then return false end
+    local ok = pcall(function() r:FireServer(...) end)
+    return ok
+end
+
+-------------------------------------------------------------------
+-- BASIC HELPERS
+-------------------------------------------------------------------
+local function getCharacter(pl) if not pl then return nil end return pl.Character end
+local function getHumanoid(pl) local c = getCharacter(pl) return c and c:FindFirstChildOfClass("Humanoid") end
+local function getHRP(pl) local c = getCharacter(pl) return c and c:FindFirstChild("HumanoidRootPart") end
+local function isAlive(pl) local h = getHumanoid(pl) return h and h.Health > 0 end
+
+local function getPlayerLevel(pl)
+    if not pl then return nil end
+    local ls = pl:FindFirstChild("leaderstats")
+    if ls then
+        local L = ls:FindFirstChild("Level") or ls:FindFirstChild("level") or ls:FindFirstChild("Lvl")
+        if L and tonumber(L.Value) then return tonumber(L.Value) end
+        local b = ls:FindFirstChild("Bounty/Honor") or ls:FindFirstChild("Bounty")
+        if b and tonumber(b.Value) then return tonumber(b.Value) end
+    end
+    local d = pl:FindFirstChild("Data")
+    if d then
+        local L = d:FindFirstChild("Level") or d:FindFirstChild("level")
+        if L and tonumber(L.Value) then return tonumber(L.Value) end
+    end
+    return nil
+end
+
+local function isFriend(pl)
+    if not pl then return false end
+    local ok, res = pcall(function() return LocalPlayer:IsFriendsWith(pl.UserId) end)
+    return ok and res
+end
+
+local function hasCup(pl)
+    if not pl then return false end
+    if pl:FindFirstChild("HasCup") then
+        local v = pl:FindFirstChild("HasCup")
+        return v.Value == true
+    end
+    if pl.Character and pl.Character:FindFirstChild("Cup") then return true end
+    return false
+end
+
+local function inSafeZone(pl)
+    if not pl or not pl.Character then return false end
+    local char = pl.Character
+    if char:FindFirstChild("InSafeZone") then
+        local v = char:FindFirstChild("InSafeZone")
+        if v and v.Value ~= nil then return v.Value end
+    end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        for _, part in ipairs(Workspace:GetDescendants()) do
+            if part:IsA("BasePart") and (part.Name:lower():find("safe") or part.Name:lower():find("zone")) then
+                if (hrp.Position - part.Position).Magnitude <= (part.Size.Magnitude/2 + 6) then
+                    return true
                 end
-                pcall(function()
-                    commE:FireServer("Ken", true)
-                end)
-            end
-        end
-        autoKenRunning = false
-    end)   
-    print("[Ken] Đã bật Auto Ken")
-end
-local function StopKenLoop()
-    KenEnabled = false
-    while autoKenRunning do
-        task.wait(0.1)
-    end   
-    print("[Ken] Đã tắt Auto Ken")
-end
-function KenModule:SetState(state)
-    if state == KenEnabled then return end  
-    KenEnabled = state
-    if state then
-        StartKenLoop()
-    else
-        StopKenLoop()
-    end
-end
-function KenModule:IsEnabled()
-    return KenEnabled
-end
-function KenModule:GetRunningState()
-    return autoKenRunning
-end
-player.CharacterAdded:Connect(function()
-    if KenEnabled and not autoKenRunning then
-        task.wait(1)
-        StartKenLoop()
-    end
-end)
-ReplicatedStorage.DescendantAdded:Connect(function(descendant)
-    if descendant.Name == "CommE" and KenEnabled then
-        StopKenLoop()
-        task.wait(1)
-        StartKenLoop()
-    end
-end)
-
-return KenModule
-
---này là aimbot nè 
-
-local SilentAimModule = {}
-
-local Players = game:GetService("Players")
-local player = Players.LocalPlayer
-local Character = player.Character or player.CharacterAdded:Wait()
-local UserInputService = game:GetService("UserInputService")  
-local RunService = game:GetService("RunService")
-local camera = workspace.CurrentCamera
-local RS = game:GetService("ReplicatedStorage")
-local commE = RS:WaitForChild("Remotes"):WaitForChild("CommE")
-local MouseModule = RS:FindFirstChild("Mouse")
-
-local Services = setmetatable({}, {
-    __index = function(self, serviceName)
-        local good, service = pcall(game.GetService, game, serviceName);
-        if (good) then
-            self[serviceName] = service
-            return service;
-        end
-    end
-});
-
--- Biến trạng thái CHÍNH
-local SilentAimPlayersEnabled = false
-local UserWantsplayerAim = false
-local PredictionEnabled = false
-local HighlightEnabled = false 
-local AutoKen = false
-local ZSkillorM1 = false
-local autoKenRunning = false
-
-local renderConnection = nil
-local currentTool = nil
-local playersaimbot = nil
-local PlayersPosition = nil
-local currentHighlight = nil
-local Selectedplayer = nil
-local MiniPlayerState = nil
-local MiniPlayerCreated = false
-local MiniPlayerGui = nil
-
-local characterConnections = {}
-local Skills = {"X"}
-local Booms = {"TAP"}
-
-local PredictionAmount = 0.1
-local maxRange = 1000
-
--- ================= VSkillModule Integration =================
-local lastTool = nil
-local sharkZActive, vActive, cursedZActive = false, false, false
-local dmgConn = nil
-local rightTouchActive = false
-
-local function clearVSkillConnections()
-	if dmgConn then
-		pcall(function() dmgConn:Disconnect() end)
-		dmgConn = nil
-	end
-end
-
-local function DisableSilentAimbot()
-    SilentAimPlayersEnabled = false
-end
-
-local function EnableSilentAimbot()
-    SilentAimPlayersEnabled = UserWantsplayerAim
-end
-
-local function hookTool(tool)
-    currentTool = tool
-    lastTool = tool.Name
-    table.insert(characterConnections, tool.AncestryChanged:Connect(function(_, parent)
-        if not parent then
-            currentTool = nil
-            lastTool = nil
-            sharkZActive, vActive, cursedZActive = false, false, false
-            rightTouchActive = false
-            EnableSilentAimbot()
-        end
-    end))
-end
-
-local function isValidStopCondition()
-    return (currentTool and currentTool.Name == "Shark Anchor" and sharkZActive)
-        or (lastTool == "Dough-Dough" and vActive)
-        or (currentTool and currentTool.Name == "Cursed Dual Katana" and cursedZActive)
-end
-
--- Touch Control (Mobile)
-UserInputService.TouchStarted:Connect(function(touch)
-    local camera = workspace.CurrentCamera
-    if not camera then return end
-    
-    if touch.Position.X > camera.ViewportSize.X / 2 then
-        rightTouchActive = true
-
-        if isValidStopCondition() then
-            DisableSilentAimbot()
-        end
-    end
-end)
-
-UserInputService.TouchEnded:Connect(function(touch)
-    local camera = workspace.CurrentCamera
-    if not camera then return end
-    
-    if touch.Position.X > camera.ViewportSize.X / 2 then
-        rightTouchActive = false
-
-        EnableSilentAimbot()
-        sharkZActive, vActive, cursedZActive = false, false, false
-    end
-end)
-
--- Damage Counter Watch
-local function watchDamageCounter()
-	clearVSkillConnections()
-
-	task.spawn(function()
-		while true do
-			local gui = player:FindFirstChild("PlayerGui")
-			if not gui then
-				task.wait(1)
-				continue
-			end
-
-			gui = gui:FindFirstChild("Main")
-			if not gui then
-				task.wait(1)
-				continue
-			end
-
-			local dmgCounter = gui:FindFirstChild("DmgCounter")
-			if not dmgCounter then
-				task.wait(1)
-				continue
-			end
-
-			local dmgTextLabel = dmgCounter:FindFirstChild("Text")
-			if not dmgTextLabel then
-				task.wait(1)
-				continue
-			end
-
-			dmgConn = dmgTextLabel:GetPropertyChangedSignal("Text"):Connect(function()
-				local dmgText = tonumber(dmgTextLabel.Text) or 0
-				if dmgText > 0 and isValidStopCondition() and rightTouchActive then
-					DisableSilentAimbot()
-				elseif not rightTouchActive then
-					EnableSilentAimbot()
-				end
-			end)
-			table.insert(characterConnections, dmgConn)			
-			break
-		end
-	end)
-end
-
--- Skill Detection
-if not getgenv().VSkillHooked then
-    getgenv().VSkillHooked = true
-    local old
-	old = hookmetamethod(game, "__namecall", function(self, ...)
-	    local method = getnamecallmethod()
-	    local args = {...}
-    
-	    if (method == "InvokeServer" or method == "FireServer") then
-	        local a1 = args[1]
-
-	        if typeof(a1) == "string" and a1:upper() == "Z" then
-	            if currentTool and currentTool.Name == "Shark Anchor" then
-	                sharkZActive = true
-	            end
-	        end
-        
-	        if typeof(a1) == "string" and a1:upper() == "V" then
-	            if lastTool == "Dough-Dough" then
-	                vActive = true
-	            end
-	        end
-        
-	        if typeof(a1) == "string" and a1:upper() == "Z" then
-	            if currentTool and currentTool.Name == "Cursed Dual Katana" then
-	                cursedZActive = true
-	            end
-			end
-	    end
-	    return old(self, ...)
-	end)
-end
--- ================= END VSkillModule =================
-
--- Lấy HumanoidRootPart
-local function getHRP(model)
-	if not model or not model:FindFirstChild("HumanoidRootPart") then return nil end
-	return model.HumanoidRootPart
-end
-
--- Xóa connections cũ
-local function clearConnections()
-	for _, conn in ipairs(characterConnections) do
-		pcall(function() conn:Disconnect() end)
-	end
-	characterConnections = {}
-	clearVSkillConnections()
-end
-
--- Tính toán vị trí dự đoán
-local function getPredictedPosition(hrp)
-	if not hrp then return nil end
-
-	local humanoid = hrp.Parent:FindFirstChildOfClass("Humanoid")
-	if not humanoid then
-		return hrp.Position
-	end
-
-	if not PredictionEnabled or humanoid.WalkSpeed < 5 then
-		return hrp.Position
-	end
-
-	return hrp.Position + (hrp.Velocity * PredictionAmount)
-end
-
--- Kiểm tra đồng đội
-local function isAllyWithMe(targetplayer)
-	local myGui = player:FindFirstChild("PlayerGui")
-	if not myGui then return false end
-
-	local scrolling = myGui:FindFirstChild("Main")
-		and myGui.Main:FindFirstChild("Allies")
-		and myGui.Main.Allies:FindFirstChild("Container")
-		and myGui.Main.Allies.Container.Allies:FindFirstChild("ScrollingFrame")
-
-	if scrolling then
-		for _, frame in pairs(scrolling:GetDescendants()) do
-			if frame:IsA("ImageButton") and frame.Name == targetplayer.Name then
-				return true
-			end
-		end
-	end
-
-	return false
-end
-
--- Kiểm tra kẻ thù
-local function isEnemy(targetplayer)
-	if not targetplayer or targetplayer == player then
-		return false
-	end
-
-	local myTeam = player.Team
-	local targetTeam = targetplayer.Team
-
-	if myTeam and targetTeam then
-		if myTeam.Name == "Pirates" and targetTeam.Name == "Marines" then
-			return true
-		elseif myTeam.Name == "Marines" and targetTeam.Name == "Pirates" then
-			return true
-		end
-
-		if myTeam.Name == "Pirates" and targetTeam.Name == "Pirates" then
-			if isAllyWithMe(targetplayer) then
-				return false -- ally, not enemy
-			end
-			return true
-		end
-
-		if myTeam.Name == "Marines" and targetTeam.Name == "Marines" then
-			return false
-		end
-	end
-
-	return true
-end
-
--- Tìm player gần nhất
-local function getClosestplayer(lpHRP)
-	if not lpHRP then return nil end
-	
-	local closest = nil
-	local closestDist = math.huge
-	for _, pl in ipairs(Players:GetPlayers()) do
-		if pl ~= player and isEnemy(pl) and pl.Character and pl.Character.Parent ~= nil then
-			local hum = pl.Character:FindFirstChildWhichIsA("Humanoid")
-			local hrp = getHRP(pl.Character)
-			if hum and hum.Health > 0 and hrp then
-				local dist = (hrp.Position - lpHRP.Position).Magnitude
-				if dist <= maxRange and dist < closestDist then
-					closestDist = dist
-					closest = pl
-				end
-			end
-		end
-	end
-	return closest
-end
-
--- Kiểm tra skill ready
-local function isSkillReadyForTool(toolName)
-    if not toolName then return false end
-    local playerGui = player:FindFirstChild("PlayerGui")
-    if not playerGui then return false end
-    local skillsFolder = playerGui:FindFirstChild("Main") and playerGui.Main:FindFirstChild("Skills")
-    if not skillsFolder then return false end
-    local toolFrame = skillsFolder:FindFirstChild(toolName)
-    if not toolFrame then return false end
-
-    for _, skillKey in ipairs({"Z","X","C","V"}) do
-        local skill = toolFrame:FindFirstChild(skillKey)
-        if skill and skill:FindFirstChild("Cooldown") and skill.Cooldown:IsA("Frame") then
-            local cooldownSize = skill.Cooldown.Size.X.Scale
-            if cooldownSize == 1.0 then
-                return true
             end
         end
     end
     return false
 end
 
-local function isNotDoughValidCondition()
-    return (currentTool and currentTool.Name == "Dough-Dough")
-end
-
-local function isNotValidCondition()
-    return (currentTool and currentTool.Name == "Lightning-Lightning")
-    or (currentTool and currentTool.Name == "Portal-Portal")
-end
-
--- Main render loop cho aimbot player
-local function startRenderLoop()
-    if renderConnection then return end
-
-    renderConnection = RunService.RenderStepped:Connect(function()
-        local lpChar = player.Character
-        if not lpChar then return end
-        local lpHRP = lpChar:FindFirstChild("HumanoidRootPart")
-        if not lpHRP then return end
-
-        if not SilentAimPlayersEnabled then
-            return
-        end
-
-        local lookTargetPos = nil
-
-        if SilentAimPlayersEnabled then
-            local targetplayer = Selectedplayer or getClosestplayer(lpHRP)
-            if targetplayer and targetplayer ~= player and targetplayer.Character then
-                playersaimbot = targetplayer.Name
-                local hrp = getHRP(targetplayer.Character)
-                PlayersPosition = getPredictedPosition(hrp)
-                lookTargetPos = PlayersPosition
-            else
-                playersaimbot, PlayersPosition = nil, nil
-            end
-        end
-
-        -- Tự động xoay character về hướng mục tiêu
-        if currentTool and lookTargetPos and isSkillReadyForTool(currentTool.Name) and not isNotDoughValidCondition() then
-	        local lookVector = (Vector3.new(lookTargetPos.X, lpHRP.Position.Y, lookTargetPos.Z) - lpHRP.Position).Unit
-	            lpHRP.CFrame = CFrame.new(lpHRP.Position, lpHRP.Position + lookVector)
-	    end
-    end)
-end
-
-local function stopRenderLoop()
-    if renderConnection then
-        renderConnection:Disconnect()
-        renderConnection = nil
-    end
-end
-
-local function isValidCondition()
-    return (currentTool and currentTool.Name == "Buddy Sword")
-end
-
--- Hook metatable để thay đổi vị trí nhắm
-spawn(function()
-    local ok, hookMeta = pcall(getrawmetatable, game)
-    if ok and hookMeta then
-        setreadonly(hookMeta, false)
-        local OldHook
-        OldHook = hookmetamethod(game, "__namecall", function(self, V1, V2, ...)
-            local Method = (getnamecallmethod and getnamecallmethod():lower()) or ""
-
-            if tostring(self) == "RemoteEvent" and Method == "fireserver" then
-                if typeof(V1) == "Vector3" then
-                    if SilentAimPlayersEnabled and PlayersPosition then
-                        return OldHook(self, PlayersPosition, V2, ...)
-                    end
-				end				
-				if type(V1) == "string" and table.find(Booms, V1) then
-					if ZSkillorM1 then 
-	                    if SilentAimPlayersEnabled and PlayersPosition then
-	                        return OldHook(self, V1, PlayersPosition, nil, ...)
-	                    end
-					end
-				end   
-            elseif Method == "invokeserver" then  
-	            if isValidCondition() then
-	                if type(V1) == "string" and table.find(Skills, V1) then  
-	                    if SilentAimPlayersEnabled and PlayersPosition then  
-	                        return OldHook(self, V1, PlayersPosition, nil, ...)
-	                    end  
-	                end    
-				end				
-			end
-            
-            return OldHook(self, V1, V2, ...)
-        end)
-        setreadonly(hookMeta, true)
-    end
-end)
-
--- Mouse hook (nếu cần)
-if not isNotValidCondition() then
-	if MouseModule and typeof(MouseModule) == "Instance" then
-        local ok2, okResult = pcall(function()
-            return require(MouseModule)
-        end)
-
-        if ok2 and okResult then  
-            if type(okResult) == "table" then  
-                Mouse = okResult  
-            else  
-                Mouse = nil  
-            end  
-        else  
-            Mouse = nil  
-        end  
-
-        RunService.Heartbeat:Connect(function()  	        
-		    if not ZSkillorM1 or (not SilentAimPlayersEnabled) then
-		        return
-		    end
-		
-            if Mouse and ZSkillorM1 and SilentAimPlayersEnabled then  
-                local targetCFrame = nil  
-
-                if PlayersPosition then  
-                    targetCFrame = CFrame.new(PlayersPosition)  
-                end  
-
-                if targetCFrame then  
-                    pcall(function()  
-                        if type(Mouse) == "table" then  
-                            Mouse.Hit = targetCFrame  
-                            Mouse.Target = nil  
-                        end  
-                    end)  
-
-                    if MouseModule then  
-                        local ok, MouseData = pcall(require, MouseModule)  
-                        if ok and type(MouseData) == "table" then  
-                            MouseData.Hit = targetCFrame  
-                            MouseData.Target = nil  
-                        end  
-                    end  
-                end  
-            end  
-        end)
-    end
-end
-
--- Auto Ken function
-local HasTag = function(tagName)
-  local char = player.Character
-  if (not char) then return false; end
-  return Services.CollectionService:HasTag(char, tagName);
-end
-
-local function startAutoKenLoop()
-    if autoKenRunning then return end
-    autoKenRunning = true
-
-    task.spawn(function()
-        while AutoKen do
-            task.wait(0.1)
-
-            if HasTag("Ken") then
-                local playerGui = player:FindFirstChild("PlayerGui")
-                if playerGui then
-                    local kenButton = playerGui:FindFirstChild("MobileContextButtons")
-                    and playerGui.MobileContextButtons.ContextButtonFrame:FindFirstChild("BoundActionKen")
-
-                    if kenButton and kenButton:GetAttribute("Selected") ~= true then
-                        kenButton:SetAttribute("Selected", true)
-                    end
-                end
-
-                local observationManager = getrenv()._G.OM
-                if observationManager and not observationManager.active then
-                    observationManager.radius = 0
-                    observationManager:setActive(true)
-                    commE:FireServer("Ken", true)
-                end
-            end
-        end
-        autoKenRunning = false
-    end)
-end
-
--- Character management
-local function onCharacterAdded(char)
-    clearConnections()
-
-    for _, child in ipairs(char:GetChildren()) do
-        if child:IsA("Tool") then
-            hookTool(child)
-        end
-    end
-
-    table.insert(characterConnections, char.ChildAdded:Connect(function(child)
-        if child:IsA("Tool") then hookTool(child) end
-    end))
-
-    table.insert(characterConnections, char.ChildRemoved:Connect(function(child)
-        if child == currentTool then
-            currentTool = nil
-        end
-    end))
-
-    watchDamageCounter()
-end
-
-player.CharacterAdded:Connect(onCharacterAdded)
-if player.Character then onCharacterAdded(player.Character) end
-
--- ================= PUBLIC API CHO WINDUI =================
-function SilentAimModule:SetAutoKen(state)
-    AutoKen = state
-
-    if state then
-        startAutoKenLoop()
-    end
-end
-
-function SilentAimModule:SetZSkillorM1(state)
-    ZSkillorM1 = state
-end
-
-function SilentAimModule:Pause()
-	SilentAimPlayersEnabled = false
-    stopRenderLoop()
-end
-
-function SilentAimModule:Restore()
-	SilentAimPlayersEnabled = UserWantsplayerAim
-    if UserWantsplayerAim then
-        startRenderLoop()
-    end
-end
-
-function SilentAimModule:IsplayerAimEnabled()
-    return SilentAimPlayersEnabled
-end
-
-function SilentAimModule:SetDistanceLimit(num)
-	if typeof(num) == "number" then
-		maxRange = num
-	end
-end
-
-function SilentAimModule:SetSelectedPlayer(playerName)
-	if not playerName or playerName == "" then
-		Selectedplayer = nil
-		return
-	end
-
-	local found = Players:FindFirstChild(playerName)
-	if found then
-		Selectedplayer = found
-	end
-end
-
-function SilentAimModule:GetSelectedPlayer()
-	return Selectedplayer and Selectedplayer.Name or "None"
-end
-
-function SilentAimModule:SetPrediction(state)
-	PredictionEnabled = state
-end
-
-function SilentAimModule:SetPredictionAmount(num)
-	if typeof(num) == "number" then
-		PredictionAmount = num
-	end
-end
-
--- QUAN TRỌNG: Function chính để tích hợp với WindUI Toggle
-function SilentAimModule:SetPlayerSilentAim(state)
-    UserWantsplayerAim = state
-    SilentAimPlayersEnabled = state
-
-    if state then
-        startRenderLoop()
-        print("[Aimbot] Đã bật Auto Farm")
-    else
-        stopRenderLoop()
-        print("[Aimbot] Đã tắt Auto Farm")
-    end
-end
-
-return SilentAimModule
-
- -- này là auto bật v4 nè 
- 
-local RaceV4Module = {}
-
-local Players = game:GetService("Players")
-local VirtualInputManager = game:GetService("VirtualInputManager")
-
-local Player = Players.LocalPlayer
-local RaceV4Enabled = false
-local raceLoop = nil
-
-local function ActivateRaceV4()
-    VirtualInputManager:SendKeyEvent(true, "Y", false, game)
-    task.wait(0.1)
-    VirtualInputManager:SendKeyEvent(false, "Y", false, game)
-end
-
-local function StartRaceV4Loop()
-    if raceLoop then return end
-    
-    raceLoop = task.spawn(function()
-        while RaceV4Enabled do
-            task.wait(0.2)
-            pcall(function()
-                local Char = Player.Character
-                if Char then
-                    local Energy = Char:FindFirstChild("RaceEnergy")
-                    if Energy and Energy.Value == 1 then
-                        ActivateRaceV4()
-                    end
-                end
-            end)
-        end
-    end)
-    
-    print("[Race V4] Đã bật Auto Race V4")
-end
-
-local function StopRaceV4Loop()
-    RaceV4Enabled = false
-    if raceLoop then
-        task.cancel(raceLoop)
-        raceLoop = nil
-    end
-    
-    print("[Race V4] Đã tắt Auto Race V4")
-end
-
-function RaceV4Module:SetState(state)
-    if state then
-        RaceV4Enabled = true
-        StartRaceV4Loop()
-    else
-        StopRaceV4Loop()
-    end
-end
-
-function RaceV4Module:IsEnabled()
-    return RaceV4Enabled
-end
-
-Player.CharacterAdded:Connect(function()
-    if RaceV4Enabled then
-        StopRaceV4Loop()
-        task.wait(1)
-        StartRaceV4Loop()
-    end
-end)
-
-return RaceV4Module
-
-
-này là flash attack nè 
-
-local FlashAttackModule = {}
-
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
-local VirtualInputManager = game:GetService("VirtualInputManager")
-
-local Player = Players.LocalPlayer
-local Modules = ReplicatedStorage:WaitForChild("Modules")
-local Net = Modules:WaitForChild("Net")
-local RegisterAttack = Net:WaitForChild("RE/RegisterAttack")
-local RegisterHit = Net:WaitForChild("RE/RegisterHit")
-local ShootGunEvent = Net:WaitForChild("RE/ShootGunEvent")
-local GunValidator = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Validator2")
-
--- Biến trạng thái
-local FlashAttackEnabled = false
-local attackConnection = nil
-local fastAttackInstance = nil
-
--- Biến tối ưu
-local lastScanTime = 0
-local cachedBladeHits = {}
-local lastAttackTime = 0
-
-local Config = {
-    AttackDistance = 150,
-    AttackMobs = true,
-    AttackPlayers = true,
-    AttackCooldown = 0.01,
-    ComboResetTime = 0.01,
-    MaxCombo = 3,
-    HitboxLimbs = {"RightLowerArm", "RightUpperArm", "LeftLowerArm", "LeftUpperArm", "RightHand", "LeftHand"},
-    AutoClickEnabled = true,
-    OptimizedScanInterval = 0.01 -- Giảm tần suất quét
-}
-
--- FastAttack Class
-local FastAttack = {}
-FastAttack.__index = FastAttack
-
-function FastAttack.new()
-    local self = setmetatable({
-        Debounce = 0,
-        ComboDebounce = 0,
-        ShootDebounce = 0,
-        M1Combo = 0,
-        EnemyRootPart = nil,
-        Connections = {},
-        Overheat = {Dragonstorm = {MaxOverheat = 3, Cooldown = 0, TotalOverheat = 0, Distance = 350, Shooting = false}},
-        ShootsPerTarget = {["Dual Flintlock"] = 2},
-        SpecialShoots = {["Skull Guitar"] = "TAP", ["Bazooka"] = "Position", ["Cannon"] = "Position", ["Dragonstorm"] = "Overheat"}
-    }, FastAttack)
-    
-    pcall(function()
-        self.CombatFlags = require(Modules.Flags).COMBAT_REMOTE_THREAD
-        self.ShootFunction = getupvalue(require(ReplicatedStorage.Controllers.CombatController).Attack, 9)
-        local LocalScript = Player:WaitForChild("PlayerScripts"):FindFirstChildOfClass("LocalScript")
-        if LocalScript and getsenv then
-            self.HitFunction = getsenv(LocalScript)._G.SendHitsToServer
-        end
-    end)
-    
-    return self
-end
-
-function FastAttack:IsEntityAlive(entity)
-    local humanoid = entity and entity:FindFirstChild("Humanoid")
-    return humanoid and humanoid.Health > 0
-end
-
-function FastAttack:CheckStun(Character, Humanoid, ToolTip)
-    local Stun = Character:FindFirstChild("Stun")
-    local Busy = Character:FindFirstChild("Busy")
-    if Humanoid.Sit and (ToolTip == "Sword" or ToolTip == "Melee" or ToolTip == "Blox Fruit") then
-        return false
-    elseif Stun and Stun.Value > 0 or Busy and Busy.Value then
-        return false
-    end
+-------------------------------------------------------------------
+-- TARGET SELECTION
+-------------------------------------------------------------------
+local function isValidTarget(pl)
+    if not pl or pl == LocalPlayer then return false end
+    if not isAlive(pl) then return false end
+    if CFG["Don't attack friends"] and isFriend(pl) then return false end
+    if CFG["Don't attack player have cup"] and hasCup(pl) then return false end
+    if CFG.SafeZoneEnabled and inSafeZone(pl) then return false end
+    local lvl = getPlayerLevel(pl)
+    if lvl and lvl < CFG.MinLevel then return false end
     return true
 end
 
--- Hàm quét tối ưu với cache
-function FastAttack:GetBladeHits(Character, Distance)
-    -- Sử dụng cache nếu chưa hết thời gian
-    if tick() - lastScanTime < Config.OptimizedScanInterval and #cachedBladeHits > 0 then
-        return cachedBladeHits
-    end
-    
-    local Position = Character:GetPivot().Position
-    local BladeHits = {}
-    Distance = Distance or Config.AttackDistance
-    
-    local function ProcessTargets(Folder, CanAttack)
-        for _, Enemy in ipairs(Folder:GetChildren()) do
-            if Enemy ~= Character and self:IsEntityAlive(Enemy) then
-                local BasePart = Enemy:FindFirstChild("HumanoidRootPart") -- Ưu tiên RootPart để giảm tính toán
-                if BasePart and (Position - BasePart.Position).Magnitude <= Distance then
-                    if not self.EnemyRootPart then
-                        self.EnemyRootPart = BasePart
-                    else
-                        table.insert(BladeHits, {Enemy, BasePart})
-                    end
-                end
-            end
+local function scanClosestTarget()
+    local myHRP = getHRP(LocalPlayer)
+    local best, bestd = nil, math.huge
+    for _, p in ipairs(Players:GetPlayers()) do
+        if isValidTarget(p) and p.Character and p.Character.Parent ~= nil then
+            local hrp = getHRP(p)
+            if hrp and myHRP then
+                local d = (hrp.Position - myHRP.Position).Magnitude
+                if d <= CFG.TargetMaxDistance and d < bestd then bestd = d best = p end
+            elseif hrp then best = p; break end
         end
     end
-    
-    if Config.AttackMobs then ProcessTargets(Workspace.Enemies) end
-    if Config.AttackPlayers then ProcessTargets(Workspace.Characters, true) end
-    
-    -- Cache kết quả
-    lastScanTime = tick()
-    cachedBladeHits = BladeHits
-    
-    return BladeHits
+    return best
 end
 
-function FastAttack:GetClosestEnemy(Character, Distance)
-    local BladeHits = self:GetBladeHits(Character, Distance)
-    local Closest, MinDistance = nil, math.huge
-    
-    for _, Hit in ipairs(BladeHits) do
-        local Magnitude = (Character:GetPivot().Position - Hit[2].Position).Magnitude
-        if Magnitude < MinDistance then
-            MinDistance = Magnitude
-            Closest = Hit[2]
-        end
+-------------------------------------------------------------------
+-- ACTIONS: team, pvp, race, buso, ken, equip
+-------------------------------------------------------------------
+local lastTeamTick, lastPvPTick = 0, 0
+local function autoSelectTeam()
+    if tick() - lastTeamTick < 3 then return end
+    lastTeamTick = tick()
+    log("Attempting SelectTeam:", CFG.Team)
+    if CommF_ then
+        pcall(function() CommF_:InvokeServer("SetTeam", CFG.Team) end)
     end
-    return Closest
 end
 
-function FastAttack:GetCombo()
-    local Combo = (tick() - self.ComboDebounce) <= Config.ComboResetTime and self.M1Combo or 0
-    Combo = Combo >= Config.MaxCombo and 1 or Combo + 1
-    self.ComboDebounce = tick()
-    self.M1Combo = Combo
-    return Combo
-end
-
-function FastAttack:ShootInTarget(TargetPosition)
-    local Character = Player.Character
-    if not self:IsEntityAlive(Character) then return end
-    
-    local Equipped = Character:FindFirstChildOfClass("Tool")
-    if not Equipped or Equipped.ToolTip ~= "Gun" then return end
-    
-    local Cooldown = Equipped:FindFirstChild("Cooldown") and Equipped.Cooldown.Value or 0.3
-    if (tick() - self.ShootDebounce) < Cooldown then return end
-    
-    local ShootType = self.SpecialShoots[Equipped.Name] or "Normal"
-    if ShootType == "Position" or (ShootType == "TAP" and Equipped:FindFirstChild("RemoteEvent")) then
-        Equipped:SetAttribute("LocalTotalShots", (Equipped:GetAttribute("LocalTotalShots") or 0) + 1)
-        GunValidator:FireServer(self:GetValidator2())
-        
-        if ShootType == "TAP" then
-            Equipped.RemoteEvent:FireServer("TAP", TargetPosition)
+local function ensurePvP()
+    if tick() - lastPvPTick < 2 then return end
+    lastPvPTick = tick()
+    pcall(function()
+        local ok, gui = pcall(function() return LocalPlayer.PlayerGui and LocalPlayer.PlayerGui:FindFirstChild("Main") end)
+        if ok and gui and gui:FindFirstChild("PvpDisabled") and gui.PvpDisabled.Visible == true then
+            log("PvP appears disabled, invoking EnablePvp")
+            if CommF_ then CommF_:InvokeServer("EnablePvp") end
         else
-            ShootGunEvent:FireServer(TargetPosition)
-        end
-        self.ShootDebounce = tick()
-    else
-        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
-        task.wait(0.05)
-        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
-        self.ShootDebounce = tick()
-    end
-end
-
-function FastAttack:GetValidator2()
-    local v1 = getupvalue(self.ShootFunction, 15)
-    local v2 = getupvalue(self.ShootFunction, 13)
-    local v3 = getupvalue(self.ShootFunction, 16)
-    local v4 = getupvalue(self.ShootFunction, 17)
-    local v5 = getupvalue(self.ShootFunction, 14)
-    local v6 = getupvalue(self.ShootFunction, 12)
-    local v7 = getupvalue(self.ShootFunction, 18)
-    
-    local v8 = v6 * v2
-    local v9 = (v5 * v2 + v6 * v1) % v3
-    v9 = (v9 * v3 + v8) % v4
-    v5 = math.floor(v9 / v3)
-    v6 = v9 - v5 * v3
-    v7 = v7 + 1
-    
-    setupvalue(self.ShootFunction, 15, v1)
-    setupvalue(self.ShootFunction, 13, v2)
-    setupvalue(self.ShootFunction, 16, v3)
-    setupvalue(self.ShootFunction, 17, v4)
-    setupvalue(self.ShootFunction, 14, v5)
-    setupvalue(self.ShootFunction, 12, v6)
-    setupvalue(self.ShootFunction, 18, v7)
-    
-    return math.floor(v9 / v4 * 16777215), v7
-end
-
-function FastAttack:UseNormalClick(Character, Humanoid, Cooldown)
-    self.EnemyRootPart = nil
-    local BladeHits = self:GetBladeHits(Character)
-    
-    if self.EnemyRootPart then
-        RegisterAttack:FireServer(Cooldown)
-        if self.CombatFlags and self.HitFunction then
-            self.HitFunction(self.EnemyRootPart, BladeHits)
-        else
-            RegisterHit:FireServer(self.EnemyRootPart, BladeHits)
-        end
-    end
-end
-
-function FastAttack:UseFruitM1(Character, Equipped, Combo)
-    local Targets = self:GetBladeHits(Character)
-    if not Targets[1] then return end
-    
-    local Direction = (Targets[1][2].Position - Character:GetPivot().Position).Unit
-    Equipped.LeftClickRemote:FireServer(Direction, Combo)
-end
-
-function FastAttack:Attack()
-    if not FlashAttackEnabled or (tick() - self.Debounce) < Config.AttackCooldown then return end
-    local Character = Player.Character
-    if not Character or not self:IsEntityAlive(Character) then return end
-    
-    local Humanoid = Character.Humanoid
-    local Equipped = Character:FindFirstChildOfClass("Tool")
-    if not Equipped then return end
-    
-    local ToolTip = Equipped.ToolTip
-    if not table.find({"Melee", "Blox Fruit", "Sword", "Gun"}, ToolTip) then return end
-    
-    local Cooldown = Equipped:FindFirstChild("Cooldown") and Equipped.Cooldown.Value or Config.AttackCooldown
-    if not self:CheckStun(Character, Humanoid, ToolTip) then return end
-    
-    local Combo = self:GetCombo()
-    Cooldown = Cooldown + (Combo >= Config.MaxCombo and 0.05 or 0)
-    self.Debounce = Combo >= Config.MaxCombo and ToolTip ~= "Gun" and (tick() + 0.05) or tick()
-    
-    if ToolTip == "Blox Fruit" and Equipped:FindFirstChild("LeftClickRemote") then
-        self:UseFruitM1(Character, Equipped, Combo)
-    elseif ToolTip == "Gun" then
-        local Target = self:GetClosestEnemy(Character, 120)
-        if Target then
-            self:ShootInTarget(Target.Position)
-        end
-    else
-        self:UseNormalClick(Character, Humanoid, Cooldown)
-    end
-end
-
--- Flash Attack chính (đã tối ưu)
-local function GetBladeHits()
-    -- Sử dụng cache để tránh quét liên tục
-    if tick() - lastScanTime < Config.OptimizedScanInterval and #cachedBladeHits > 0 then
-        return cachedBladeHits
-    end
-    
-    local targets = {}
-    local playerPos = Player.Character and Player.Character:GetPivot().Position
-    
-    if not playerPos then return targets end
-    
-    local function ProcessFolder(folder)
-        for _, v in pairs(folder:GetChildren()) do
-            if v:FindFirstChild("HumanoidRootPart") and v:FindFirstChild("Humanoid") and v.Humanoid.Health > 0 then
-                local distance = (v.HumanoidRootPart.Position - playerPos).Magnitude
-                if distance < 60 then
-                    table.insert(targets, v)
-                end
-            end
-        end
-    end
-    
-    if Config.AttackMobs then ProcessFolder(Workspace.Enemies) end
-    if Config.AttackPlayers then ProcessFolder(Workspace.Characters) end
-    
-    lastScanTime = tick()
-    cachedBladeHits = targets
-    return targets
-end
-
-local function AttackAll()
-    if not FlashAttackEnabled or tick() - lastAttackTime < 0.1 then return end
-    lastAttackTime = tick()
-    
-    local character = Player.Character
-    if not character then return end
-
-    local equippedWeapon = character:FindFirstChild("EquippedWeapon")
-    if not equippedWeapon then return end
-
-    local enemies = GetBladeHits()
-    if #enemies > 0 then
-        RegisterAttack:FireServer(-math.huge)
-        
-        local args = {nil, {}}
-        for i, v in pairs(enemies) do
-            if not args[1] then
-                args[1] = v.Head
-            end
-            args[2][i] = {v, v.HumanoidRootPart}
-        end
-        
-        RegisterHit:FireServer(unpack(args))
-    end
-end
-
--- Fast Attack 2 (đã tối ưu)
-local Funcs = {}
-
-function GetAllBladeHits()
-    -- Sử dụng cache chung
-    if tick() - lastScanTime < Config.OptimizedScanInterval and #cachedBladeHits > 0 then
-        return cachedBladeHits
-    end
-    return GetBladeHits() -- Dùng hàm chung đã được tối ưu
-end
-
-function Getplayerhit()
-    local bladehits = {}
-    local playerPos = Player.Character and Player.Character:GetPivot().Position
-    
-    if not playerPos then return bladehits end
-    
-    for _, v in pairs(Workspace.Characters:GetChildren()) do
-        if v.Name ~= Player.Name and v:FindFirstChild("Humanoid") and v:FindFirstChild("HumanoidRootPart") and v.Humanoid.Health > 0 then
-            local distance = (v.HumanoidRootPart.Position - playerPos).Magnitude
-            if distance <= 65 then
-                table.insert(bladehits, v)
-            end
-        end
-    end
-    return bladehits
-end
-
-function Funcs:Attack()
-    if not FlashAttackEnabled or tick() - lastAttackTime < 0.1 then return end
-    
-    local bladehits = GetAllBladeHits()
-    local playerHits = Getplayerhit()
-    
-    -- Gộp kết quả
-    for _, v in pairs(playerHits) do
-        table.insert(bladehits, v)
-    end
-    
-    if #bladehits == 0 then return end
-    
-    local args = {
-        [1] = nil,
-        [2] = {},
-        [4] = "078da341"
-    }
-    
-    for r, v in pairs(bladehits) do
-        RegisterAttack:FireServer(0)
-        if not args[1] then
-            args[1] = v.Head
-        end
-        args[2][r] = {
-            [1] = v,
-            [2] = v.HumanoidRootPart
-        }
-    end
-    RegisterHit:FireServer(unpack(args))
-end
-
--- API chính (đã tối ưu)
-function FlashAttackModule:Start()
-    if FlashAttackEnabled then return end
-    
-    FlashAttackEnabled = true
-    
-    -- Reset cache
-    lastScanTime = 0
-    cachedBladeHits = {}
-    lastAttackTime = 0
-    
-    -- Khởi tạo FastAttack instance
-    fastAttackInstance = FastAttack.new()
-    
-    -- Bắt đầu các loop tấn công với tần suất được kiểm soát
-    attackConnection = RunService.Heartbeat:Connect(function()
-        local currentTime = tick()
-        
-        -- Chỉ cho phép tấn công mỗi 0.1s để giảm tải
-        if currentTime - lastAttackTime >= 0.1 then
-            if fastAttackInstance then
-                fastAttackInstance:Attack()
-            end
-            AttackAll()
-            Funcs:Attack()
-            lastAttackTime = currentTime
+            log("Trying to ensure PvP anyway")
+            if CommF_ then CommF_:InvokeServer("EnablePvp") end
         end
     end)
-    
-    -- Hook functions (giữ nguyên logic)
-    for _, v in pairs(getgc(true)) do
-        if typeof(v) == "function" and iscclosure(v) then
-            local name = debug.getinfo(v).name
-            if name == "Attack" or name == "attack" or name == "RegisterHit" then
-                hookfunction(v, function(...)
-                    if fastAttackEnabled and fastAttackInstance then
-                        fastAttackInstance:Attack()
-                    end
-                    return v(...)
+end
+
+local function ensureRaceV3V4()
+    pcall(function()
+        if CommF_ then CommF_:InvokeServer("RaceV3") end
+        if CommF_ then CommF_:InvokeServer("RaceV4") end
+    end)
+    log("Race V3/V4 trigger attempted")
+end
+
+local function ensureBuso()
+    if CommF_ then pcall(function() CommF_:InvokeServer("Buso") end) end
+    log("Buso attempted")
+end
+
+local function ensureKen()
+    if CommE then pcall(function() CommE:FireServer("Ken", true) end) end
+    pcall(function()
+        local gui = LocalPlayer:FindFirstChild("PlayerGui")
+        if gui and gui:FindFirstChild("MobileContextButtons") then
+            local frame = gui.MobileContextButtons:FindFirstChild("ContextButtonFrame")
+            if frame then
+                local btn = frame:FindFirstChild("BoundActionKen")
+                if btn and btn:GetAttribute("Selected") ~= true then btn:SetAttribute("Selected", true) end
+            end
+        end
+    end)
+    log("Ken attempted")
+end
+
+local function equipFirstMelee()
+    local char = LocalPlayer.Character
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    local candidates = {}
+    if char then for _,c in ipairs(char:GetChildren()) do if c:IsA("Tool") then table.insert(candidates,c) end end end
+    if backpack then for _,c in ipairs(backpack:GetChildren()) do if c:IsA("Tool") then table.insert(candidates,c) end end end
+    for _, t in ipairs(candidates) do
+        local tip = tostring(t.ToolTip or ""):lower()
+        local name = tostring(t.Name or ""):lower()
+        if tip:find("melee") or tip:find("fist") or tip:find("blade") or name:find("melee") or name:find("sword") then
+            pcall(function()
+                if t.Parent ~= char then t.Parent = char end
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hum then hum:EquipTool(t) end
+            end)
+            log("Equipped melee tool:", t.Name)
+            return t
+        end
+    end
+    if candidates[1] then
+        pcall(function()
+            if candidates[1].Parent ~= char then candidates[1].Parent = char end
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum then hum:EquipTool(candidates[1]) end
+        end)
+        log("Equipped fallback tool:", candidates[1].Name)
+        return candidates[1]
+    end
+    log("No tool to equip")
+    return nil
+end
+
+-------------------------------------------------------------------
+-- MOVEMENT & NoClip
+-------------------------------------------------------------------
+local noclipConn = nil
+local function setNoClip(enable)
+    if noclipConn then noclipConn:Disconnect(); noclipConn = nil end
+    if enable then
+        noclipConn = RunService.Heartbeat:Connect(function()
+            local char = LocalPlayer.Character
+            if not char then return end
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then pcall(function() part.CanCollide = false end) end
+            end
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum then pcall(function() hum.PlatformStand = true end) end
+        end)
+    else
+        local char = LocalPlayer.Character
+        if char then
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then pcall(function() part.CanCollide = true end) end
+            end
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum then pcall(function() hum.PlatformStand = false end) end
+        end
+    end
+end
+
+local function flyTo(pos, speed)
+    if not pos then return end
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    speed = speed or CFG.FlySpeed
+    local goal = CFrame.new(pos) * CFrame.new(0, 3, 0)
+    local t = math.clamp((speed / 1500), 0.02, 0.65)
+    pcall(function() hrp.CFrame = hrp.CFrame:Lerp(goal, t) end)
+    pcall(function() hrp.CFrame = CFrame.new(hrp.Position, pos) end)
+end
+
+-------------------------------------------------------------------
+-- SKILL SPAM & TOOL CYCLE
+-------------------------------------------------------------------
+local lastSpam = 0
+local function spamAllSkillsOn(target)
+    if not target or not target.Character then return end
+    if tick() - lastSpam < CFG.SpamInterval then return end
+    lastSpam = tick()
+    local pos = nil
+    pcall(function() local hrp = target.Character:FindFirstChild("HumanoidRootPart"); if hrp then pos = hrp.Position end end)
+    if CommE then
+        pcall(function()
+            CommE:FireServer("Z", pos)
+            CommE:FireServer("X", pos)
+            CommE:FireServer("C", pos)
+            CommE:FireServer("V", pos)
+        end)
+    end
+    if CommF_ then
+        pcall(function()
+            CommF_:InvokeServer("UseSkill", "Z", pos)
+            CommF_:InvokeServer("UseSkill", "X", pos)
+            CommF_:InvokeServer("UseSkill", "C", pos)
+            CommF_:InvokeServer("UseSkill", "V", pos)
+            CommF_:InvokeServer("Attack", pos)
+        end)
+    end
+end
+
+local function cycleTools()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    local list = {}
+    if char then for _,v in ipairs(char:GetChildren()) do if v:IsA("Tool") then table.insert(list,v) end end end
+    if backpack then for _,v in ipairs(backpack:GetChildren()) do if v:IsA("Tool") then table.insert(list,v) end end end
+    local order = {"melee","sword","fruit","gun"}
+    for _,kw in ipairs(order) do
+        for _,tool in ipairs(list) do
+            local tip = tostring(tool.ToolTip or ""):lower()
+            local name = tostring(tool.Name or ""):lower()
+            if tip:find(kw) or name:find(kw) then
+                pcall(function()
+                    if tool.Parent ~= char then tool.Parent = char end
+                    local hum = char:FindFirstChildOfClass("Humanoid")
+                    if hum then hum:EquipTool(tool) end
                 end)
+                return tool
             end
         end
     end
-    
-    print("[Flash Attack] Đã bật Flash Attack (Đã tối ưu)")
+    if list[1] then
+        pcall(function()
+            if list[1].Parent ~= char then list[1].Parent = char end
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum then hum:EquipTool(list[1]) end
+        end)
+        return list[1]
+    end
+    return nil
 end
 
-function FlashAttackModule:Stop()
-    if not FlashAttackEnabled then return end
-    
-    FlashAttackEnabled = false
-    
-    -- Ngắt kết nối
-    if attackConnection then
-        attackConnection:Disconnect()
-        attackConnection = nil
-    end
-    
-    -- Dọn dẹp instance
-    if fastAttackInstance then
-        for _, conn in ipairs(fastAttackInstance.Connections) do
-            pcall(function() conn:Disconnect() end)
+-------------------------------------------------------------------
+-- LOW-HP ESCAPE (tele permitted ONLY here)
+-------------------------------------------------------------------
+local function lowHpEscape(oldTarget)
+    log("Low HP detected -> teleport up")
+    pcall(function()
+        local char = LocalPlayer.Character
+        if not char then return end
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if hrp then hrp.CFrame = hrp.CFrame + Vector3.new(0, 1000, 0) end
+    end)
+    setNoClip(true)
+    while true do
+        if not running then break end
+        local hum = getHumanoid(LocalPlayer)
+        if hum then
+            local perc = (hum.Health / (hum.MaxHealth > 0 and hum.MaxHealth or 1)) * 100
+            if perc >= CFG.SafeZoneHealUntil then break end
         end
-        fastAttackInstance = nil
+        pcall(function()
+            local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if hrp then hrp.CFrame = hrp.CFrame + Vector3.new(0, 50, 0) end
+        end)
+        task.wait(0.6)
     end
-    
-    -- Clear cache
-    cachedBladeHits = {}
-    
-    print("[Flash Attack] Đã tắt Flash Attack")
+    if oldTarget and oldTarget.Character and oldTarget.Character:FindFirstChild("HumanoidRootPart") then
+        local pos = oldTarget.Character.HumanoidRootPart.Position
+        pcall(function()
+            local char = LocalPlayer.Character
+            if char and char:FindFirstChild("HumanoidRootPart") then
+                char.HumanoidRootPart.CFrame = CFrame.new(pos + Vector3.new(0, 5, 0))
+            end
+        end)
+    end
+    log("Escape finished, reengaging")
+    setNoClip(true)
 end
 
-function FlashAttackModule:SetState(state)
-    if state then
-        self:Start()
-    else
-        self:Stop()
-    end
+-------------------------------------------------------------------
+-- SERVER HOP (naive)
+-------------------------------------------------------------------
+local lastHop = 0
+local function canServerHop()
+    local ok, pvpDisabled = pcall(function()
+        local gui = LocalPlayer.PlayerGui and LocalPlayer.PlayerGui:FindFirstChild("Main")
+        if gui and gui:FindFirstChild("PvpDisabled") then return gui.PvpDisabled.Visible end
+        return true
+    end)
+    if ok then return pvpDisabled else return true end
+end
+local function serverHop()
+    if tick() - lastHop < CFG.ServerHopDebounce then return end
+    if not canServerHop() then log("In PvP -> delaying server hop") return end
+    lastHop = tick()
+    log("Server hop triggered (naive Teleport)")
+    pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
 end
 
-function FlashAttackModule:IsEnabled()
-    return FlashAttackEnabled
+-------------------------------------------------------------------
+-- MAIN AUTOMATION (aggressive auto-start + logging)
+-------------------------------------------------------------------
+local running = false
+local automationThread = nil
+local currentTarget = nil
+
+local function automationLoop()
+    log("Automation loop started")
+    while running do
+        -- PREPARE
+        autoSelectTeam()
+        ensureRaceV3V4()
+        ensurePvP()
+        ensureBuso()
+        ensureKen()
+        equipFirstMelee()
+
+        -- Acquire target
+        if not currentTarget or not isValidTarget(currentTarget) then
+            currentTarget = scanClosestTarget()
+            if currentTarget then log("Target acquired:", currentTarget.Name) end
+        end
+
+        if currentTarget and isValidTarget(currentTarget) then
+            -- ENGAGE
+            log("Engaging:", currentTarget.Name)
+            setNoClip(true)
+            local hrp = getHRP(currentTarget)
+            if hrp then flyTo(hrp.Position, CFG.FlySpeed) end
+
+            -- COMBAT
+            spamAllSkillsOn(currentTarget)
+            cycleTools()
+
+            -- Monitor HP
+            local hum = getHumanoid(LocalPlayer)
+            if hum then
+                local perc = (hum.Health / (hum.MaxHealth > 0 and hum.MaxHealth or 1)) * 100
+                if perc <= CFG.SafeZoneLeaveHP then
+                    log("HP low:", perc, "% -> escaping")
+                    lowHpEscape(currentTarget)
+                end
+            end
+
+            -- Target dead?
+            if not isAlive(currentTarget) then
+                log("Target dead:", currentTarget.Name)
+                currentTarget = nil
+                setNoClip(false)
+                task.wait(0.6)
+            end
+        else
+            -- NO TARGET behavior
+            log("No valid target found -> checking server hop")
+            if canServerHop() then
+                serverHop()
+                task.wait(3)
+            else
+                task.wait(3)
+            end
+        end
+        task.wait(0.12)
+    end
+    log("Automation loop stopped")
+    setNoClip(false)
 end
 
-return FlashAttackModule
-
---này là auto bật haki vũ Trang nè 
-
-local BusoModule = {}
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local commF_ = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("CommF_")
-local AutoHakiBusoEnabled = false
-local busoLoop = nil
-local function StartBusoLoop()
-    if busoLoop then 
-        task.cancel(busoLoop)
-        busoLoop = nil
+-------------------------------------------------------------------
+-- RESPAWN HANDLING
+-------------------------------------------------------------------
+LocalPlayer.CharacterAdded:Connect(function()
+    log("CharacterAdded (respawn) detected")
+    task.wait(1)
+    if running then
+        ensureRaceV3V4()
+        ensurePvP()
+        ensureBuso()
+        ensureKen()
+        setNoClip(false)
+        task.wait(1)
     end
-    
-    busoLoop = task.spawn(function()
-        while AutoHakiBusoEnabled do
-            pcall(function()
-                local player = Players.LocalPlayer
-                local character = player.Character
-                
-                if character and not character:FindFirstChild("HasBuso") then
-                    local args = {[1] = "Buso"}
-                    commF_:InvokeServer(unpack(args))
+end)
+
+-------------------------------------------------------------------
+-- UI: draggable panel + small square toggle (mobile-friendly)
+-------------------------------------------------------------------
+local function createUI()
+    pcall(function()
+        local screen = Instance.new("ScreenGui")
+        screen.Name = "PHUCMAX_Bounty_UI"
+        screen.ResetOnSpawn = false
+        screen.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+        local panel = Instance.new("Frame")
+        panel.Name = "MainPanel"
+        panel.Size = UDim2.new(0, 360, 0, 150)
+        panel.Position = UDim2.new(0.5, -180, 0.06, 0)
+        panel.AnchorPoint = Vector2.new(0.5, 0)
+        panel.BackgroundColor3 = Color3.fromRGB(22,22,28)
+        panel.BorderSizePixel = 0
+        panel.Parent = screen
+        local corner = Instance.new("UICorner", panel); corner.CornerRadius = UDim.new(0, 10)
+
+        local bg = Instance.new("ImageLabel", panel)
+        bg.Size = UDim2.new(1,0,1,0); bg.Position = UDim2.new(0,0,0,0)
+        bg.Image = CFG.UIBackgroundImage; bg.BackgroundTransparency = 1; bg.ImageTransparency = 0.5; bg.ScaleType = Enum.ScaleType.Crop
+
+        local title = Instance.new("TextLabel", panel)
+        title.Text = "PHUCMAX bounty"; title.Font = Enum.Font.GothamBold; title.TextSize = 20; title.TextColor3 = Color3.new(1,1,1)
+        title.BackgroundTransparency = 1; title.Position = UDim2.new(0.02,0,0.03,0); title.Size = UDim2.new(0.6,0,0.18,0)
+        title.TextXAlignment = Enum.TextXAlignment.Left
+
+        local by = Instance.new("TextLabel", panel)
+        by.Text = "by PHUCMAX"; by.Font = Enum.Font.Gotham; by.TextSize = 12; by.TextColor3 = Color3.fromRGB(200,200,200)
+        by.BackgroundTransparency = 1; by.Position = UDim2.new(0.02,0,0.21,0); by.Size = UDim2.new(0.6,0,0.12,0); by.TextXAlignment = Enum.TextXAlignment.Left
+
+        local timeLabel = Instance.new("TextLabel", panel)
+        timeLabel.Text = os.date("%H:%M:%S"); timeLabel.Font = Enum.Font.Gotham; timeLabel.TextSize = 12
+        timeLabel.TextColor3 = Color3.fromRGB(200,200,200); timeLabel.BackgroundTransparency = 1
+        timeLabel.Position = UDim2.new(0.02,0,0.35,0); timeLabel.Size = UDim2.new(0.6,0,0.12,0)
+
+        local bountyLabel = Instance.new("TextLabel", panel)
+        bountyLabel.Text = "Bounty: --"; bountyLabel.Font = Enum.Font.Gotham; bountyLabel.TextSize = 14
+        bountyLabel.TextColor3 = Color3.fromRGB(255,200,50); bountyLabel.BackgroundTransparency = 1
+        bountyLabel.Position = UDim2.new(0.02,0,0.51,0); bountyLabel.Size = UDim2.new(0.6,0,0.14,0)
+        bountyLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+        local function makeBtn(text, x)
+            local b = Instance.new("TextButton", panel)
+            b.Size = UDim2.new(0.3, 0, 0.2, 0)
+            b.Position = UDim2.new(x, 0, 0.72, 0)
+            b.BackgroundColor3 = Color3.fromRGB(45,45,60)
+            b.Text = text; b.Font = Enum.Font.GothamSemibold; b.TextSize = 14; b.TextColor3 = Color3.fromRGB(230,230,230)
+            local c = Instance.new("UICorner", b); c.CornerRadius = UDim.new(0,6)
+            return b
+        end
+
+        local btnNext  = makeBtn("Next Player", 0.02)
+        local btnHop   = makeBtn("Hop Server", 0.36)
+        local btnReset = makeBtn("Reset", 0.70)
+
+        btnNext.MouseButton1Click:Connect(function() currentTarget = nil; log("Next player pressed") end)
+        btnHop.MouseButton1Click:Connect(function() serverHop(); log("Hop server pressed") end)
+        btnReset.MouseButton1Click:Connect(function()
+            currentTarget = nil; setNoClip(false); ensurePvP(); ensureBuso(); ensureKen(); equipFirstMelee()
+            log("Reset pressed")
+        end)
+
+        local toggle = Instance.new("Frame", screen)
+        toggle.Size = UDim2.new(0,38,0,38); toggle.Position = UDim2.new(0,8,0,8); toggle.BackgroundColor3 = Color3.fromRGB(40,40,55)
+        local tcorner = Instance.new("UICorner", toggle); tcorner.CornerRadius = UDim.new(0,6)
+        local tlabel = Instance.new("TextLabel", toggle); tlabel.Size = UDim2.new(1,0,1,0); tlabel.BackgroundTransparency = 1; tlabel.Text = "UI"; tlabel.Font = Enum.Font.GothamSemibold; tlabel.TextSize = 14; tlabel.TextColor3 = Color3.fromRGB(230,230,230)
+
+        toggle.InputBegan:Connect(function(inp)
+            if inp.UserInputType == Enum.UserInputType.Touch or inp.UserInputType == Enum.UserInputType.MouseButton1 then
+                panel.Visible = not panel.Visible
+            end
+        end)
+
+        local function makeDraggable(obj)
+            local dragging, dragInput, dragStart, startPos = false, nil, nil, nil
+            obj.InputBegan:Connect(function(input)
+                if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                    dragging = true; dragStart = input.Position; startPos = obj.Position
+                    input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end)
                 end
             end)
-            task.wait(1)
+            obj.InputChanged:Connect(function(input)
+                if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+                    dragInput = input
+                end
+            end)
+            UserInputService.InputChanged:Connect(function(input)
+                if input == dragInput and dragging and dragStart and startPos then
+                    local delta = input.Position - dragStart
+                    obj.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+                end
+            end)
         end
+        makeDraggable(panel); makeDraggable(toggle)
+
+        spawn(function()
+            while panel.Parent do
+                pcall(function()
+                    timeLabel.Text = os.date("%H:%M:%S")
+                    local ok, val = pcall(function()
+                        local ls = LocalPlayer:FindFirstChild("leaderstats")
+                        if ls then local b = ls:FindFirstChild("Bounty/Honor") or ls:FindFirstChild("Bounty") if b then return tostring(b.Value) end end
+                        return "--"
+                    end)
+                    bountyLabel.Text = "Bounty: "..(ok and val or "--")
+                end)
+                task.wait(1)
+            end
+        end)
     end)
-    
-    print("[Buso] Đã bật Auto Haki Buso")
 end
 
-local function StopBusoLoop()
-    AutoHakiBusoEnabled = false
-    if busoLoop then
-        task.cancel(busoLoop)
-        busoLoop = nil
+-------------------------------------------------------------------
+-- START / STOP / AUTO-START
+-------------------------------------------------------------------
+local function startAutomation()
+    if running then log("Already running") return end
+    log("Starting Auto Bounty")
+    running = true
+    automationThread = task.spawn(automationLoop)
+end
+
+local function stopAutomation()
+    if not running then log("Not running") return end
+    running = false
+    if automationThread then
+        pcall(function() task.cancel(automationThread) end)
+        automationThread = nil
     end
-    
-    print("[Buso] Đã tắt Auto Haki Buso")
+    setNoClip(false)
+    log("Stopped Auto Bounty")
 end
 
-function BusoModule:SetState(state)
-    if state then
-        AutoHakiBusoEnabled = true
-        StartBusoLoop()
+_G.PHUCMAX_AutoBounty = _G.PHUCMAX_AutoBounty or {}
+_G.PHUCMAX_AutoBounty.Start = startAutomation
+_G.PHUCMAX_AutoBounty.Stop  = stopAutomation
+_G.PHUCMAX_AutoBounty.IsRunning = function() return running end
+_G.PHUCMAX_AutoBounty.Config = CFG
+
+pcall(createUI)
+
+task.spawn(function()
+    log("Waiting for game to load and DataLoaded")
+    repeat task.wait() until game:IsLoaded()
+    repeat task.wait() until LocalPlayer:FindFirstChild("DataLoaded")
+    log("Game loaded and DataLoaded detected. Remotes:", (Remotes ~= nil))
+    Remotes = safeFindRemotes()
+    CommF_ = Remotes and Remotes:FindFirstChild("CommF_") or CommF_
+    CommE  = Remotes and Remotes:FindFirstChild("CommE") or CommE
+    log("CommF_ present:", CommF_ ~= nil, "CommE present:", CommE ~= nil)
+
+    autoSelectTeam()
+    ensureRaceV3V4()
+    ensurePvP()
+    ensureBuso()
+    ensureKen()
+    equipFirstMelee()
+
+    if CFG.AutoStart then
+        startAutomation()
     else
-        StopBusoLoop()
-    end
-end
-
-function BusoModule:IsEnabled()
-    return AutoHakiBusoEnabled
-end
-
-Players.LocalPlayer.CharacterAdded:Connect(function()
-    if AutoHakiBusoEnabled then
-        StopBusoLoop()
-        task.wait(2)
-        StartBusoLoop()
-    end
-end)
-ReplicatedStorage.DescendantAdded:Connect(function(descendant)
-    if descendant.Name == "CommF_" and AutoHakiBusoEnabled then
-        StopBusoLoop()
-        task.wait(1)
-        StartBusoLoop()
+        log("AutoStart disabled; call _G.PHUCMAX_AutoBounty.Start() to run")
     end
 end)
 
-return BusoModule
+log("PHUCMAX AutoBounty script loaded. AutoStart =", tostring(CFG.AutoStart))
 
-
---- dữ liệu bounty của player 
-"Bounty : "..game:GetService("Players").LocalPlayer.leaderstats["Bounty/Honor"].Value.."\n"..
-
---chọn team
-
--- AUTO SELECT TEAM (Blox Fruits)
-
-getgenv().team = "Marines" 
--- đổi thành "Pirates" nếu muốn
-
-repeat wait() until game:IsLoaded() 
-    and game.Players.LocalPlayer:FindFirstChild("DataLoaded")
-
--- Chỉ chạy khi đang ở màn hình chọn phe
-if game:GetService("Players").LocalPlayer.PlayerGui:FindFirstChild("Main (minimal)") then
-    repeat
-        task.wait()
-        local Remotes = game.ReplicatedStorage:WaitForChild("Remotes")
-        Remotes.CommF_:InvokeServer("SetTeam", getgenv().team)
-        task.wait(3)
-    until not game:GetService("Players").LocalPlayer.PlayerGui:FindFirstChild("Main (minimal)")
-end
-
-
+-- EOF
