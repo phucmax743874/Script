@@ -1,0 +1,680 @@
+-- PHUCMAXskidde.lua
+-- Updated: Full AutoBounty + integrated aimbot/skill handling per your spec
+-- Author: (Your Name)
+-- Notes:
+--  - Teleports only in LOW_HP_ESCAPE (up) and REENGAGE (down).
+--  - Uses heuristics and many pcall wrappers to avoid errors on different servers.
+--  - Integrates an aimbot hook that replaces Vector3/fire payloads with predicted target position
+--    when SilentAim is active during COMBAT. This increases hit reliability for remote-based skills.
+--  - Tool-specific skill attempts included for common patterns (Melee, Sword, Fruit, Gun).
+--  - Server-hop is best-effort; for robust hop we can add Roblox HTTP server list logic.
+
+-- Services
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local TeleportService = game:GetService("TeleportService")
+local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- Remotes (safe lookups)
+local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
+local CommF_ = Remotes and Remotes:FindFirstChild("CommF_")
+local CommE  = Remotes and Remotes:FindFirstChild("CommE")
+local Validator2 = Remotes and Remotes:FindFirstChild("Validator2")
+
+-- Config read from global (same structure you provided)
+local function readConfig()
+    local cfg = _G["HoHo Hub Auto Bounty V36"] or _G.AutoBountyConfig or {}
+    cfg["Select Team"] = cfg["Select Team"] or "Pirates"
+    cfg["Max Level Distance"] = cfg["Max Level Distance"] or 612
+    cfg["Don't attack friends"] = (cfg["Don't attack friends"] == nil) and true or cfg["Don't attack friends"]
+    cfg["Don't attack player have cup"] = (cfg["Don't attack player have cup"] == nil) and true or cfg["Don't attack player have cup"]
+    cfg["SafeZone"] = cfg["SafeZone"] or { Enabled = true, ["Health Left (%)"] = 30, ["Wait Until Heal (%)"] = 80 }
+    cfg["Time Control"] = cfg["Time Control"] or { ["Max Time Target Player"] = 120 }
+    cfg.AutoStart = (cfg.AutoStart == nil) and true or cfg.AutoStart
+    cfg["Prediction Amount"] = cfg["Prediction Amount"] or 0.12
+    cfg["Aimbot MaxRange"] = cfg["Aimbot MaxRange"] or 1000
+    return cfg
+end
+
+local config = readConfig()
+
+-- Utility safe wrappers
+local function safeInvoke(remote, ...)
+    if not remote then return false, "no_remote" end
+    local ok, res = pcall(function() return remote:InvokeServer(...) end)
+    return ok, res
+end
+local function safeFire(remote, ...)
+    if not remote then return false end
+    local ok = pcall(function() remote:FireServer(...) end)
+    return ok
+end
+
+-- Wait until DataLoaded
+task.spawn(function()
+    repeat task.wait() until game:IsLoaded() and LocalPlayer:FindFirstChild("DataLoaded")
+end)
+
+-- ---------------------------
+-- Aimbot / Silent Aim Setup
+-- ---------------------------
+local SilentAim = {
+    Enabled = false,
+    UserWants = false,
+    PredictionAmount = config["Prediction Amount"],
+    PlayersPosition = nil,
+    MaxRange = config["Aimbot MaxRange"],
+    SelectedPlayer = nil,
+}
+
+-- Compute predicted position
+local function getPredictedPositionFromHRP(hrp)
+    if not hrp then return nil end
+    local humanoid = hrp.Parent and hrp.Parent:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return hrp.Position end
+    if humanoid and humanoid.WalkSpeed < 5 then return hrp.Position end
+    return hrp.Position + (hrp.Velocity * SilentAim.PredictionAmount)
+end
+
+-- Choose target position and set global for hook to use
+local function updateSilentAimTarget(targetPlayer)
+    if not targetPlayer or not targetPlayer.Character then
+        SilentAim.PlayersPosition = nil
+        return
+    end
+    local hrp = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then SilentAim.PlayersPosition = nil; return end
+    SilentAim.PlayersPosition = getPredictedPositionFromHRP(hrp)
+end
+
+-- Hook __namecall to replace Vector3 and skill target payloads with PlayersPosition when enabled
+-- (best-effort: only if hookmetamethod available)
+local function tryHookAimbot()
+    local ok, meta = pcall(getrawmetatable, game)
+    if not ok or not meta then return end
+    local old = meta.__namecall
+    pcall(function() setreadonly(meta, false) end)
+    if type(meta) == "table" and old then
+        meta.__namecall = newcclosure(function(self, ...)
+            local method = getnamecallmethod and getnamecallmethod():lower() or ""
+            local args = {...}
+            -- Replace Vector3 payloads sent to RemoteEvent/RemoteFunction when we have PlayersPosition
+            if SilentAim.Enabled and SilentAim.PlayersPosition then
+                -- If first argument is Vector3 (aiming by position)
+                if typeof(args[1]) == "Vector3" then
+                    args[1] = SilentAim.PlayersPosition
+                    return old(self, unpack(args))
+                end
+                -- If first arg is string skill name and second arg is Vector3 (many patterns)
+                if type(args[1]) == "string" and typeof(args[2]) == "Vector3" then
+                    args[2] = SilentAim.PlayersPosition
+                    return old(self, unpack(args))
+                end
+                -- If first arg is string skill name alone (some servers use name only then target implied), don't replace
+            end
+            return old(self, ...)
+        end)
+    end
+    pcall(function() setreadonly(meta, true) end)
+end
+
+-- Try hooking aimbot immediately (if supported)
+pcall(tryHookAimbot)
+
+-- ---------------------------
+-- Core AutoBounty State Machine
+-- ---------------------------
+local STATE = {
+    INIT = "INIT",
+    PREPARE = "PREPARE",
+    FIND_TARGET = "FIND_TARGET",
+    ENGAGE = "ENGAGE",
+    COMBAT = "COMBAT",
+    LOW_HP_ESCAPE = "LOW_HP_ESCAPE",
+    REENGAGE = "REENGAGE",
+    TARGET_DEAD = "TARGET_DEAD",
+    NO_TARGET = "NO_TARGET",
+    SERVER_HOP = "SERVER_HOP",
+    RESPAWN = "RESPAWN",
+}
+
+local state = STATE.INIT
+local running = false
+local currentTarget = nil
+local targetAcquiredAt = 0
+local lastTeamSelect = 0
+local lastPvPEnable = 0
+local lastServerHop = 0
+
+-- Helpers ------------------------------------------------
+local function getHumanoid(plr)
+    if not plr or not plr.Character then return nil end
+    return plr.Character:FindFirstChildOfClass("Humanoid")
+end
+local function getHRP(plr)
+    if not plr or not plr.Character then return nil end
+    return plr.Character:FindFirstChild("HumanoidRootPart")
+end
+local function isAlive(plr)
+    local hum = getHumanoid(plr)
+    return hum and hum.Health > 0
+end
+
+local function isFriend(p)
+    if not p then return false end
+    local ok, res = pcall(function() return LocalPlayer:IsFriendsWith(p.UserId) end)
+    return ok and res
+end
+
+local function hasCup(p)
+    if not p then return false end
+    if p:FindFirstChild("HasCup") then
+        return p:FindFirstChild("HasCup").Value
+    end
+    if p.Character and p.Character:FindFirstChild("Cup") then return true end
+    return false
+end
+
+local function inSafeZone(p)
+    if not p or not p.Character then return false end
+    if p.Character:FindFirstChild("InSafeZone") then
+        local v = p.Character:FindFirstChild("InSafeZone")
+        if v and v.Value ~= nil then return v.Value end
+    end
+    -- fallback proximity heuristic:
+    local hrp = getHRP(p)
+    if hrp then
+        for _, part in ipairs(Workspace:GetDescendants()) do
+            if part:IsA("BasePart") and (part.Name:lower():find("safe") or part.Name:lower():find("zone")) then
+                if (hrp.Position - part.Position).Magnitude <= (part.Size.Magnitude/2 + 5) then return true end
+            end
+        end
+    end
+    return false
+end
+
+local function getPlayerLevel(p)
+    if not p then return nil end
+    local ls = p:FindFirstChild("leaderstats")
+    if ls then
+        local L = ls:FindFirstChild("Level") or ls:FindFirstChild("level") or ls:FindFirstChild("Lvl")
+        if L and tonumber(L.Value) then return tonumber(L.Value) end
+        local b = ls:FindFirstChild("Bounty/Honor") or ls:FindFirstChild("Bounty")
+        if b and tonumber(b.Value) then return tonumber(b.Value) end
+    end
+    local data = p:FindFirstChild("Data")
+    if data then
+        local L = data:FindFirstChild("Level")
+        if L and tonumber(L.Value) then return tonumber(L.Value) end
+    end
+    return nil
+end
+
+local function isValidTarget(p)
+    if not p or p == LocalPlayer then return false end
+    if not isAlive(p) then return false end
+    if config["Don't attack friends"] and isFriend(p) then return false end
+    if config["Don't attack player have cup"] and hasCup(p) then return false end
+    if config.SafeZone and config.SafeZone.Enabled and inSafeZone(p) then return false end
+    local lvl = getPlayerLevel(p)
+    if lvl and tonumber(lvl) < tonumber(config["Max Level Distance"]) then return false end
+    return true
+end
+
+local function scanForTarget()
+    local best, bestDist = nil, math.huge
+    local myHRP = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    for _, p in ipairs(Players:GetPlayers()) do
+        if isValidTarget(p) then
+            local hrp = getHRP(p)
+            if hrp and myHRP then
+                local d = (hrp.Position - myHRP.Position).Magnitude
+                if d < bestDist then bestDist = d; best = p end
+            elseif not myHRP then
+                best = p; break
+            end
+        end
+    end
+    return best
+end
+
+-- Team / PvP / Haki / Races -----------------------------
+local function selectTeamOnce()
+    if tick() - lastTeamSelect < 5 then return end
+    lastTeamSelect = tick()
+    if CommF_ then pcall(function() CommF_:InvokeServer("SetTeam", config["Select Team"]) end) end
+end
+
+local function enablePvPOnce()
+    if tick() - lastPvPEnable < 2 then return end
+    lastPvPEnable = tick()
+    if CommF_ then pcall(function() CommF_:InvokeServer("EnablePvp") end) end
+end
+
+local function enableBusoOnce()
+    if CommF_ then pcall(function() CommF_:InvokeServer("Buso") end) end
+end
+
+local function enableKenOnce()
+    if CommE then pcall(function() CommE:FireServer("Ken", true) end) end
+end
+
+local function enableRaceV3V4()
+    if CommF_ then
+        pcall(function() CommF_:InvokeServer("RaceV3") end)
+        pcall(function() CommF_:InvokeServer("RaceV4") end)
+    end
+end
+
+-- Movement / NoClip / Flight --------------------------------
+local function setNoClip(enable)
+    local char = LocalPlayer.Character
+    if not char then return end
+    pcall(function()
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CanCollide = not enable and true or false
+            end
+        end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then hum.PlatformStand = enable end
+    end)
+end
+
+local function flyTowardsPosition(targetPos, speed)
+    local char = LocalPlayer.Character
+    if not char or not targetPos then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    speed = speed or 350
+    local dt = math.clamp((1/60), 0.01, 0.033)
+    local t = math.clamp((speed / 1000) * dt * 60, 0.02, 0.6)
+    local goal = CFrame.new(targetPos) * CFrame.new(0, 3, 0)
+    hrp.CFrame = hrp.CFrame:Lerp(goal, t)
+    hrp.CFrame = CFrame.new(hrp.Position, targetPos)
+end
+
+local function teleportUp(height)
+    height = height or 1000
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    pcall(function() hrp.CFrame = hrp.CFrame + Vector3.new(0, height, 0) end)
+end
+
+local function teleportToPosition(pos)
+    if not pos then return end
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    pcall(function() hrp.CFrame = CFrame.new(pos + Vector3.new(0,5,0)) end)
+end
+
+-- Server hop stub with debounce
+local function tryServerHop()
+    if tick() - lastServerHop < 10 then return end
+    lastServerHop = tick()
+    pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
+end
+
+-- Equip / Tool rotation -----------------------------------
+local function equipDefaultMelee()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    for _, tool in ipairs(char:GetChildren()) do
+        if tool:IsA("Tool") then
+            local tip = tostring(tool.ToolTip or "")
+            if tip:lower():find("melee") or tip:lower():find("sword") or tip:lower():find("fruit") or tip:lower():find("blox") then
+                pcall(function() hum:EquipTool(tool) end)
+                return
+            end
+        end
+    end
+    local bp = LocalPlayer:FindFirstChild("Backpack")
+    if bp then
+        for _, tool in ipairs(bp:GetChildren()) do
+            if tool:IsA("Tool") then
+                local tip = tostring(tool.ToolTip or "")
+                if tip:lower():find("melee") or tip:lower():find("sword") then
+                    pcall(function() hum:EquipTool(tool) end); return
+                end
+            end
+        end
+    end
+end
+
+local function rotateToolsSequence()
+    local seq = {"Melee","Sword","Blox Fruit","Fruit","Gun"}
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    local candidates = {}
+    for _, c in ipairs({char, LocalPlayer:FindFirstChild("Backpack")}) do
+        if c then
+            for _, tool in ipairs(c:GetChildren()) do
+                if tool:IsA("Tool") then table.insert(candidates, tool) end
+            end
+        end
+    end
+    for _, typ in ipairs(seq) do
+        for _, tool in ipairs(candidates) do
+            local tip = tostring(tool.ToolTip or "")
+            if tip:lower():find(typ:lower()) or tool.Name:lower():find(typ:lower()) then
+                pcall(function() hum:EquipTool(tool) end); task.wait(0.05); return
+            end
+        end
+    end
+end
+
+-- Skill firing: specific attempts per tool --------------------------------
+local lastSkillSpam = 0
+local SKILL_SPAM_INTERVAL = 0.12
+
+local function fireToolSkillsOn(target)
+    if not target or not target.Character then return end
+    if tick() - lastSkillSpam < SKILL_SPAM_INTERVAL then return end
+    lastSkillSpam = tick()
+
+    local trgHRP = target.Character:FindFirstChild("HumanoidRootPart")
+    local pos = trgHRP and trgHRP.Position
+
+    -- Update silent aim PlayersPosition for hook usage
+    SilentAim.Enabled = true
+    SilentAim.PlayersPosition = pos
+    updateSilentAimTarget(target)
+
+    local char = LocalPlayer.Character
+    local equipped = char and char:FindFirstChildOfClass("Tool")
+    local tip = (equipped and tostring(equipped.ToolTip or "")) or ""
+    local name = equipped and equipped.Name or ""
+
+    -- Melee / Sword: many servers use CommF_ InvokeServer with skill names
+    if tip:lower():find("melee") or tip:lower():find("sword") or name:lower():find("sword") then
+        if CommF_ then
+            pcall(function()
+                CommF_:InvokeServer("Z", pos)
+                CommF_:InvokeServer("X", pos)
+                CommF_:InvokeServer("C", pos)
+            end)
+        end
+        if CommE then
+            pcall(function()
+                CommE:FireServer("Z", pos)
+                CommE:FireServer("X", pos)
+            end)
+        end
+    -- Fruit: often uses CommE with skill names and sometimes extra payloads
+    elseif tip:lower():find("fruit") or name:lower():find("fruit") or tip:lower():find("blox") then
+        if CommE then
+            pcall(function()
+                CommE:FireServer("Z", pos)
+                CommE:FireServer("X", pos)
+                CommE:FireServer("C", pos)
+                CommE:FireServer("V", pos)
+            end)
+        end
+        if CommF_ then
+            pcall(function()
+                CommF_:InvokeServer("UseSkill", "Z", pos)
+                CommF_:InvokeServer("UseSkill", "X", pos)
+                CommF_:InvokeServer("UseSkill", "C", pos)
+            end)
+        end
+    -- Gun: may require invoking Gun remotes or Send mouse clicks
+    elseif tip:lower():find("gun") or name:lower():find("flint") or name:lower():find("gun") then
+        if Validator2 then
+            pcall(function() Validator2:FireServer() end)
+        end
+        if CommF_ then
+            pcall(function() CommF_:InvokeServer("Shoot", pos) end)
+        end
+        -- attempt to simulate mouse click for guns that use local input
+        pcall(function()
+            if pcall(function() return game:GetService("VirtualInputManager") end) then
+                local vim = game:GetService("VirtualInputManager")
+                vim:SendMouseButtonEvent(0,0,0,true,game,1)
+                task.wait(0.03)
+                vim:SendMouseButtonEvent(0,0,0,false,game,1)
+            end
+        end)
+    else
+        -- fallback: generic attack remote attempts
+        if CommF_ then pcall(function() CommF_:InvokeServer("Attack", pos) end) end
+        if CommE then pcall(function() CommE:FireServer("Attack", pos) end) end
+    end
+end
+
+-- Stop silent aim when leaving combat / not firing
+local function stopSilentAim()
+    SilentAim.Enabled = false
+    SilentAim.PlayersPosition = nil
+end
+
+-- AutoBounty handlers ---------------------------------------
+local function handleInit()
+    selectTeamOnce()
+    state = STATE.PREPARE
+end
+
+local lastPrepare = 0
+local function handlePrepare()
+    if tick() - lastPrepare > 1 then
+        enableRaceV3V4()
+        enablePvPOnce()
+        enableBusoOnce()
+        enableKenOnce()
+        lastPrepare = tick()
+    end
+    equipDefaultMelee()
+    if tick() - lastPrepare > 0.6 then state = STATE.FIND_TARGET end
+end
+
+local function handleFindTarget()
+    local t = scanForTarget()
+    if t then
+        currentTarget = t
+        targetAcquiredAt = tick()
+        state = STATE.ENGAGE
+    else
+        state = STATE.NO_TARGET
+    end
+end
+
+local function handleEngage()
+    if not currentTarget or not isAlive(currentTarget) then state = STATE.TARGET_DEAD; return end
+    local trgHRP = getHRP(currentTarget)
+    if trgHRP and LocalPlayer.Character then
+        setNoClip(true)
+        flyTowardsPosition(trgHRP.Position + Vector3.new(0,3,0), 350)
+    end
+    local myHRP = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if trgHRP and myHRP then
+        if (trgHRP.Position - myHRP.Position).Magnitude <= 60 or tick() - targetAcquiredAt > 6 then
+            state = STATE.COMBAT
+        end
+    else
+        state = STATE.TARGET_DEAD
+    end
+end
+
+local function handleCombat()
+    if not currentTarget or not isAlive(currentTarget) then state = STATE.TARGET_DEAD; return end
+    -- enable silent aim while firing so hooks replace vectors
+    fireToolSkillsOn(currentTarget)
+    -- stick to target
+    local trgHRP = getHRP(currentTarget)
+    if trgHRP then flyTowardsPosition(trgHRP.Position + Vector3.new(0,3,0), 350) end
+    -- rotate tools to exhaust all skill sets
+    rotateToolsSequence()
+    -- hp check
+    local myHum = getHumanoid(LocalPlayer)
+    if myHum then
+        local perc = (myHum.Health / (myHum.MaxHealth > 0 and myHum.MaxHealth or 1)) * 100
+        if perc <= (config.SafeZone and config.SafeZone["Health Left (%)"] or 30) then
+            stopSilentAim()
+            state = STATE.LOW_HP_ESCAPE
+            return
+        end
+    end
+    -- timeouts / anti-stuck: if target not engaged for configured time, re-evaluate
+    if tick() - targetAcquiredAt > (config["Time Control"] and config["Time Control"]["Max Time Target Player"] or 120) then
+        stopSilentAim()
+        state = STATE.FIND_TARGET
+    end
+end
+
+local function handleLowHpEscape()
+    -- Tele up once, ascend until healed to WaitUntilHeal(%)
+    teleportUp(1000)
+    setNoClip(true)
+    local healed = false
+    while running do
+        local hum = getHumanoid(LocalPlayer)
+        if hum then
+            local perc = (hum.Health / (hum.MaxHealth > 0 and hum.MaxHealth or 1)) * 100
+            if perc >= (config.SafeZone and config.SafeZone["Wait Until Heal (%)"] or 80) then
+                healed = true
+                break
+            end
+        end
+        -- ascend small increments
+        pcall(function()
+            local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if hrp then hrp.CFrame = hrp.CFrame + Vector3.new(0, 40, 0) end
+        end)
+        task.wait(0.6)
+    end
+    if healed then state = STATE.REENGAGE else state = STATE.NO_TARGET end
+end
+
+local function handleReengage()
+    if currentTarget and currentTarget.Character and getHRP(currentTarget) then
+        teleportToPosition(getHRP(currentTarget).Position)
+        task.wait(0.6)
+        setNoClip(true)
+        state = STATE.COMBAT
+    else
+        state = STATE.FIND_TARGET
+    end
+end
+
+local function handleTargetDead()
+    currentTarget = nil
+    setNoClip(false)
+    stopSilentAim()
+    task.wait(0.6 + math.random() * 0.4)
+    state = STATE.FIND_TARGET
+end
+
+local function handleNoTarget()
+    enablePvPOnce()
+    task.wait(1.2)
+    local t = scanForTarget()
+    if t then currentTarget = t; state = STATE.ENGAGE else state = STATE.SERVER_HOP end
+end
+
+local function handleServerHop()
+    -- only hop if not currently in a PvP fight; heuristic: try to check PvP GUI
+    -- best-effort: hop
+    tryServerHop()
+    state = STATE.INIT
+end
+
+local function handleRespawn()
+    currentTarget = nil
+    setNoClip(false)
+    stopSilentAim()
+    enableBusoOnce()
+    enableKenOnce()
+    enableRaceV3V4()
+    enablePvPOnce()
+    task.wait(1)
+    state = STATE.FIND_TARGET
+end
+
+-- Respawn listener
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(1)
+    if running then state = STATE.RESPAWN end
+end)
+
+-- Main loop control
+local loopConnection = nil
+function StartAutoBounty()
+    if running then return end
+    running = true
+    state = STATE.INIT
+    -- ensure team selection runs once at start
+    selectTeamOnce()
+    loopConnection = RunService.Heartbeat:Connect(function()
+        local ok, err = pcall(function()
+            if state == STATE.INIT then handleInit() end
+            if state == STATE.PREPARE then handlePrepare() end
+            if state == STATE.FIND_TARGET then handleFindTarget() end
+            if state == STATE.ENGAGE then handleEngage() end
+            if state == STATE.COMBAT then handleCombat() end
+            if state == STATE.LOW_HP_ESCAPE then handleLowHpEscape() end
+            if state == STATE.REENGAGE then handleReengage() end
+            if state == STATE.TARGET_DEAD then handleTargetDead() end
+            if state == STATE.NO_TARGET then handleNoTarget() end
+            if state == STATE.SERVER_HOP then handleServerHop() end
+            if state == STATE.RESPAWN then handleRespawn() end
+        end)
+        if not ok then warn("[AutoBounty] loop error:", err) end
+    end)
+    print("[AutoBounty] started")
+end
+
+function StopAutoBounty()
+    running = false
+    if loopConnection then loopConnection:Disconnect(); loopConnection = nil end
+    state = STATE.INIT
+    currentTarget = nil
+    setNoClip(false)
+    stopSilentAim()
+    print("[AutoBounty] stopped")
+end
+
+-- AutoStart if configured
+if config.AutoStart then
+    task.defer(function()
+        -- wait small time for spawn
+        task.wait(1)
+        StartAutoBounty()
+    end)
+end
+
+-- Expose control via _G
+_G.PHUCMAX_AutoBounty = {
+    Start = StartAutoBounty,
+    Stop = StopAutoBounty,
+    IsRunning = function() return running end,
+    GetState = function() return state end,
+    GetTarget = function() return currentTarget end,
+}
+
+-- Backwards-compatible legacy auto-select team for selection screen
+getgenv().team = getgenv().team or config["Select Team"] or "Marines"
+repeat task.wait() until game:IsLoaded() and LocalPlayer:FindFirstChild("DataLoaded")
+if LocalPlayer.PlayerGui:FindFirstChild("Main (minimal)") then
+    task.spawn(function()
+        while LocalPlayer.PlayerGui:FindFirstChild("Main (minimal)") do
+            pcall(function()
+                if Remotes and Remotes:FindFirstChild("CommF_") then
+                    Remotes.CommF_:InvokeServer("SetTeam", getgenv().team)
+                end
+            end)
+            task.wait(3)
+        end
+    end)
+end
+
+-- End of file
