@@ -304,12 +304,15 @@ do
 end
 
 --====================================================
--- AUTO COIN ULTRA (FIX COIN PHẢI DẪM)
+-- AUTO COIN ULTRA (HÚT LÊN ĐẦU → THẢ XUỐNG)
 --====================================================
 do
     local on = false
     local RANGE = 99999
-    local TOUCH_OFFSET = -3 -- vị trí chân
+
+    local HEAD_OFFSET = 6     -- hút coin lên trên đầu
+    local DROP_OFFSET = -2.5  -- thả xuống gần chân
+    local HOLD_TIME = 0.02    -- thời gian giữ trên đầu (rất ngắn)
 
     local function isCoin(v)
         if not v:IsA("BasePart") then return false end
@@ -335,13 +338,19 @@ do
                                     obj.CanCollide = false
                                     obj.CastShadow = false
 
-                                    -- đưa coin xuống chân để trigger touch
-                                    obj.CFrame = hrp.CFrame * CFrame.new(0, TOUCH_OFFSET, 0)
+                                    -- 1️⃣ hút coin lên đầu
+                                    obj.CFrame = hrp.CFrame * CFrame.new(0, HEAD_OFFSET, 0)
+
+                                    -- 2️⃣ giữ rất ngắn
+                                    task.wait(HOLD_TIME)
+
+                                    -- 3️⃣ thả xuống để trigger touch
+                                    obj.CFrame = hrp.CFrame * CFrame.new(0, DROP_OFFSET, 0)
                                 end)
                             end
                         end
                     end
-                    task.wait(0.03) -- rất nhanh nhưng vẫn ổn
+                    task.wait(0.03)
                 end
             end)
         end
@@ -349,15 +358,15 @@ do
 end
 
 --====================================================
--- FPS BOOST 6 LEVEL (KHÔNG TÀNG HÌNH)
+-- FPS BOOST LEVEL 1–6 (FIXED – NO CRASH)
 --====================================================
 for lv = 1,6 do
     FPS:Button({
         Title = "FPS Boost Lv"..lv,
         Callback = function()
             Lighting.GlobalShadows = false
-            Lighting.FogEnd = 1e9
             Lighting.FogStart = 1e9
+            Lighting.FogEnd = 1e9
 
             for _,v in ipairs(Workspace:GetDescendants()) do
                 if v:IsA("BasePart") then
@@ -375,22 +384,32 @@ for lv = 1,6 do
 end
 
 --====================================================
--- FPS BOOST ULTRA MODULE
+-- FPS BOOST ULTRA (ON / OFF + RESTORE ĐÚNG)
 --====================================================
 do
-    local enabled = false
-    local original = {
+    local originalLighting = {
         FogStart = Lighting.FogStart,
         FogEnd = Lighting.FogEnd,
         GlobalShadows = Lighting.GlobalShadows
     }
+    local originalParts = {}
 
     FPS:Toggle({
         Title = "FPS Boost ULTRA",
         Default = false,
         Callback = function(v)
-            enabled = v
             if v then
+                if next(originalParts) == nil then
+                    for _,o in ipairs(Workspace:GetDescendants()) do
+                        if o:IsA("BasePart") then
+                            originalParts[o] = {
+                                Material = o.Material,
+                                CastShadow = o.CastShadow
+                            }
+                        end
+                    end
+                end
+
                 Lighting.FogStart = 1e9
                 Lighting.FogEnd = 1e9
                 Lighting.GlobalShadows = false
@@ -401,53 +420,38 @@ do
                         o.CastShadow = false
                     end
                 end
-
-                WindUI:Notify({
-                    Title = "FPS Boost",
-                    Content = "on FPS ULTRA",
-                    Duration = 3,
-                    Type = "success"
-                })
             else
-                Lighting.FogStart = original.FogStart
-                Lighting.FogEnd = original.FogEnd
-                Lighting.GlobalShadows = original.GlobalShadows
+                Lighting.FogStart = originalLighting.FogStart
+                Lighting.FogEnd = originalLighting.FogEnd
+                Lighting.GlobalShadows = originalLighting.GlobalShadows
 
-                WindUI:Notify({
-                    Title = "FPS Boost",
-                    Content = "off FPS ULTRA",
-                    Duration = 3,
-                    Type = "warning"
-                })
+                for part,data in pairs(originalParts) do
+                    if part and part.Parent then
+                        part.Material = data.Material
+                        part.CastShadow = data.CastShadow
+                    end
+                end
             end
         end
     })
 end
 
 --====================================================
--- ANTI AFK (AUTO ENABLE)
+-- ANTI AFK (AUTO – GIỮ NGUYÊN)
 --====================================================
-do
-    local Players = game:GetService("Players")
-    local VirtualUser = game:GetService("VirtualUser")
-    local lp = Players.LocalPlayer
+lp.Idled:Connect(function()
+    VirtualUser:CaptureController()
+    VirtualUser:ClickButton2(Vector2.new())
+end)
 
-    -- auto anti afk
-    lp.Idled:Connect(function()
-        VirtualUser:CaptureController()
-        VirtualUser:ClickButton2(Vector2.new())
-    end)
-
-    -- nút hiển thị trạng thái (không toggle)
-    FPS:Button({
-        Title = "Anti AFK : ON",
-        Callback = function()
-            WindUI:Notify({
-                Title = "Anti AFK",
-                Content = "Anti AFK It's already operational.",
-                Duration = 3,
-                Type = "success"
-            })
-        end
-    })
-end
+FPS:Button({
+    Title = "Anti AFK : ON",
+    Callback = function()
+        WindUI:Notify({
+            Title = "Anti AFK",
+            Content = "Anti AFK is running",
+            Duration = 3,
+            Type = "success"
+        })
+    end
+})
