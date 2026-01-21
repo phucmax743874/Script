@@ -1,0 +1,327 @@
+--====================================================
+-- PHUCMAX SAFE FLY | AI FULL FIX (STABLE VERSION)
+--====================================================
+
+repeat task.wait() until game:IsLoaded()
+
+---------------- SERVICES ----------------
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local lp = Players.LocalPlayer
+
+---------------- CONFIG ----------------
+local PLAYER_SPEED = 1000
+local MAX_WAVE_SPEED = 250
+local SAFE_BACK_DISTANCE = 5
+local ARRIVE_DIST = 8
+local SAFE_CONFIRM_TIME = 0.05
+local CHECK_INTERVAL = 0.005
+
+---------------- HOLES ----------------
+local HOLES = {
+    [1] = Vector3.new(199.51, -2.82, 8.40),
+    [2] = Vector3.new(401.27, -2.82, -6.66),
+    [3] = Vector3.new(540.02, -2.82, -18.60),
+    [4] = Vector3.new(757.42, -2.82, -9.36),
+    [5] = Vector3.new(1038.84, 3.18, -5.34), 
+    [6] = Vector3.new(1064.84, -2.82, -3.08), 
+    [7] = Vector3.new(1536.53, -2.82, 3.20), 
+    [8] = Vector3.new(2257.12, -2.82, -8.04), 
+   
+}
+local HOME = Vector3.new(128.74, 3.18, 15.57)
+
+---------------- STATE ----------------
+local State = {
+    Enabled = false,
+    Target = nil,
+    Running = false,
+}
+
+local char, hrp, hum
+local statusLabel
+local ActiveThread
+local safeStart = nil
+
+---------------- RESET CORE ----------------
+local function ResetSafe()
+    safeStart = nil
+end
+
+local function ResetState(full)
+    State.Running = false
+    ResetSafe()
+
+    if full then
+        State.Enabled = false
+        State.Target = nil
+        if statusLabel then
+            statusLabel.Text = "OFF"
+        end
+    end
+
+    if ActiveThread then
+        task.cancel(ActiveThread)
+        ActiveThread = nil
+    end
+end
+
+---------------- CHARACTER ----------------
+local function BindChar(c)
+    char = c
+    hum = c:WaitForChild("Humanoid")
+    hrp = c:WaitForChild("HumanoidRootPart")
+
+    ResetState(false)
+
+    hum.Died:Connect(function()
+        -- reset như lúc vừa inject
+        ResetState(true)
+    end)
+end
+
+if lp.Character then BindChar(lp.Character) end
+lp.CharacterAdded:Connect(BindChar)
+
+---------------- NOCLIP ----------------
+local function SetNoclip(on)
+    if not char then return end
+    for _,v in ipairs(char:GetDescendants()) do
+        if v:IsA("BasePart") then
+            v.CanCollide = not on
+        end
+    end
+end
+
+---------------- WAVE UTILS ----------------
+local function IsWave(v)
+    if not v:IsA("BasePart") then return false end
+    local n = v.Name:lower()
+    return n:find("wave") or n:find("song") or n:find("sóng")
+end
+
+local function GetWaves()
+    local t = {}
+    for _,v in ipairs(workspace:GetDescendants()) do
+        if IsWave(v) then
+            table.insert(t, v)
+        end
+    end
+    return t
+end
+
+---------------- AI CORE ----------------
+local function GetMoveDir(fromPos, toPos)
+    local d = toPos - fromPos
+    if d.Magnitude == 0 then return nil end
+    return d.Unit
+end
+
+local function CanFly(hrp, targetPos)
+    local waves = GetWaves()
+    local moveDir = GetMoveDir(hrp.Position, targetPos)
+    if not moveDir then return false, "DIR" end
+
+    -- check wave sau lưng
+    for _,w in ipairs(waves) do
+        local dir = w.Position - hrp.Position
+        if moveDir:Dot(dir.Unit) < 0 and dir.Magnitude < SAFE_BACK_DISTANCE then
+            ResetSafe()
+            return false, "BACK WAVE"
+        end
+    end
+
+    local distPlayer = (targetPos - hrp.Position).Magnitude
+    local T_player = distPlayer / PLAYER_SPEED
+
+    local soonest = math.huge
+    for _,w in ipairs(waves) do
+        local dir = w.Position - hrp.Position
+        if moveDir:Dot(dir.Unit) > 0 then
+            local speed = w.AssemblyLinearVelocity and w.AssemblyLinearVelocity.Magnitude or MAX_WAVE_SPEED
+            local T_meet = dir.Magnitude / (PLAYER_SPEED + speed)
+            if T_meet < soonest then
+                soonest = T_meet
+            end
+        end
+    end
+
+    local safe = (soonest == math.huge) or (T_player < soonest)
+
+    if safe then
+        if not safeStart then
+            safeStart = tick()
+            return false, "CONFIRM"
+        elseif tick() - safeStart >= SAFE_CONFIRM_TIME then
+            ResetSafe()
+            return true, "SAFE"
+        else
+            return false, "CONFIRM"
+        end
+    else
+        ResetSafe()
+        return false, "FRONT WAVE"
+    end
+end
+
+---------------- FLY ----------------
+local function FlyTo(pos)
+    SetNoclip(true)
+    local bv = Instance.new("BodyVelocity", hrp)
+    bv.MaxForce = Vector3.new(1e6,1e6,1e6)
+
+    while hrp and hrp.Parent and (hrp.Position - pos).Magnitude > ARRIVE_DIST do
+        bv.Velocity = (pos - hrp.Position).Unit * PLAYER_SPEED
+        RunService.RenderStepped:Wait()
+    end
+
+    bv:Destroy()
+    if hrp then hrp.Velocity = Vector3.zero end
+    SetNoclip(false)
+end
+
+---------------- HELPERS ----------------
+local function GetNearestHole()
+    local min, idx = math.huge, 1
+    for i,p in pairs(HOLES) do
+        local d = (hrp.Position - p).Magnitude
+        if d < min then min, idx = d, i end
+    end
+    return idx
+end
+
+local function BuildPath(from, to)
+    local path = {}
+    if from <= to then
+        for i = from, to do table.insert(path, i) end
+    else
+        for i = from, to, -1 do table.insert(path, i) end
+    end
+    return path
+end
+
+---------------- MAIN LOOP ----------------
+task.spawn(function()
+    while true do
+        if State.Enabled and State.Target and hrp and hrp.Parent and not State.Running then
+            State.Running = true
+
+            ActiveThread = task.spawn(function()
+                local start = GetNearestHole()
+                local path = BuildPath(start, State.Target)
+
+                for _,idx in ipairs(path) do
+                    while State.Enabled and hrp and hrp.Parent do
+                        local ok, reason = CanFly(hrp, HOLES[idx])
+                        if statusLabel then
+                            statusLabel.Text = "disciple: "..reason
+                        end
+                        if ok then break end
+                        task.wait(CHECK_INTERVAL)
+                    end
+                    if not State.Enabled or not hrp or not hrp.Parent then break end
+                    FlyTo(HOLES[idx])
+                end
+
+                State.Running = false
+            end)
+        end
+        task.wait(0.05)
+    end
+end)
+
+--====================================================
+-- UI (ON / OFF)
+--====================================================
+pcall(function() lp.PlayerGui:FindFirstChild("PHUCMAX_UI"):Destroy() end)
+
+local gui = Instance.new("ScreenGui", lp.PlayerGui)
+gui.Name = "PHUCMAX_UI"
+gui.ResetOnSpawn = false
+
+local main = Instance.new("Frame", gui)
+main.Size = UDim2.new(0,260,0,320)
+main.Position = UDim2.new(1,-270,0.5,-160)
+main.BackgroundColor3 = Color3.fromRGB(28,28,34)
+main.Active = true
+Instance.new("UICorner", main)
+
+-- drag
+do
+    local d,sp,si
+    main.InputBegan:Connect(function(i)
+        if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
+            d=true si=i.Position sp=main.Position
+        end
+    end)
+    UIS.InputChanged:Connect(function(i)
+        if d then
+            local delta=i.Position-si
+            main.Position=UDim2.new(sp.X.Scale,sp.X.Offset+delta.X,sp.Y.Scale,sp.Y.Offset+delta.Y)
+        end
+    end)
+    UIS.InputEnded:Connect(function() d=false end)
+end
+
+local title = Instance.new("TextLabel", main)
+title.Size = UDim2.new(1,0,0,32)
+title.BackgroundTransparency = 1
+title.Text = "PHUCMAX SAFE FLY"
+title.Font = Enum.Font.GothamBlack
+title.TextSize = 14
+title.TextColor3 = Color3.fromRGB(0,220,190)
+
+statusLabel = Instance.new("TextLabel", main)
+statusLabel.Position = UDim2.new(0,0,0,34)
+statusLabel.Size = UDim2.new(1,0,0,18)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Text = "OFF"
+statusLabel.Font = Enum.Font.Gotham
+statusLabel.TextSize = 11
+statusLabel.TextColor3 = Color3.fromRGB(200,200,200)
+
+local list = Instance.new("ScrollingFrame", main)
+list.Position = UDim2.new(0.1,0,0,60)
+list.Size = UDim2.new(0.8,0,0,170)
+list.ScrollBarThickness = 4
+list.BackgroundTransparency = 1
+
+local layout = Instance.new("UIListLayout", list)
+layout.Padding = UDim.new(0,6)
+layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    list.CanvasSize = UDim2.new(0,0,0,layout.AbsoluteContentSize.Y+6)
+end)
+
+local function AddItem(text,val)
+    local b=Instance.new("TextButton",list)
+    b.Size=UDim2.new(1,0,0,26)
+    b.Text=text
+    b.Font=Enum.Font.GothamBold
+    b.TextSize=12
+    b.BackgroundColor3=Color3.fromRGB(55,55,65)
+    b.TextColor3=Color3.new(1,1,1)
+    Instance.new("UICorner",b)
+    b.MouseButton1Click:Connect(function()
+        State.Target = val
+        statusLabel.Text = "Target: "..text
+    end)
+end
+
+for i=1,#HOLES do AddItem("Hole "..i,i) end
+
+local toggle = Instance.new("TextButton", main)
+toggle.Position = UDim2.new(0.1,0,0.88,0)
+toggle.Size = UDim2.new(0.8,0,0,30)
+toggle.Text = "OFF"
+toggle.Font = Enum.Font.GothamBlack
+toggle.TextSize = 13
+toggle.BackgroundColor3 = Color3.fromRGB(180,60,60)
+toggle.TextColor3 = Color3.new(1,1,1)
+Instance.new("UICorner", toggle)
+
+toggle.MouseButton1Click:Connect(function()
+    State.Enabled = not State.Enabled
+    toggle.Text = State.Enabled and "ON" or "OFF"
+    toggle.BackgroundColor3 = State.Enabled and Color3.fromRGB(0,180,150) or Color3.fromRGB(180,60,60)
+end)
