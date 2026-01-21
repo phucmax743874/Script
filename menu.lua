@@ -358,91 +358,52 @@ do
 end
 
 --====================================================
--- FPS BOOST LEVEL 1–6 (FIXED – NO CRASH)
---====================================================
-for lv = 1,6 do
-    FPS:Button({
-        Title = "FPS Boost Lv"..lv,
-        Callback = function()
-            Lighting.GlobalShadows = false
-            Lighting.FogStart = 1e9
-            Lighting.FogEnd = 1e9
-
-            for _,v in ipairs(Workspace:GetDescendants()) do
-                if v:IsA("BasePart") then
-                    v.Material = Enum.Material.SmoothPlastic
-                    v.CastShadow = false
-                    v.Reflectance = 0
-                elseif v:IsA("ParticleEmitter")
-                    or v:IsA("Trail")
-                    or v:IsA("Beam") then
-                    v.Enabled = false
-                end
-            end
-        end
-    })
-end
-
---====================================================
--- FPS BOOST ULTRA (ON / OFF + RESTORE ĐÚNG)
+-- FPS BOOST (MERGED FROM bloxkidPVP) | NO FPS/PING UI
 --====================================================
 do
-    local originalLighting = {
-        FogStart = Lighting.FogStart,
-        FogEnd = Lighting.FogEnd,
-        GlobalShadows = Lighting.GlobalShadows
-    }
-    local originalParts = {}
+    -- load module gọn gàng
+    local function load(url)
+        local ok, res = pcall(function()
+            return loadstring(game:HttpGet(url, true))()
+        end)
+        return ok and res or nil
+    end
 
+    -- load 2 module FPS gốc
+    local FPSBoost = load(
+        "https://raw.githubusercontent.com/kdo91653-cpu/bloxkidPVP-/refs/heads/main/Fps%20boss"
+    )
+
+    local FPSBoostMAX = load(
+        "https://raw.githubusercontent.com/kdo91653-cpu/bloxkidPVP-/refs/heads/main/Fps%20boost%20max"
+    )
+
+    -- FPS Boost thường
     FPS:Toggle({
-        Title = "FPS Boost ULTRA",
+        Title = "FPS Boost",
         Default = false,
         Callback = function(v)
-            if v then
-                if next(originalParts) == nil then
-                    for _,o in ipairs(Workspace:GetDescendants()) do
-                        if o:IsA("BasePart") then
-                            originalParts[o] = {
-                                Material = o.Material,
-                                CastShadow = o.CastShadow
-                            }
-                        end
-                    end
-                end
+            if FPSBoost and FPSBoost.Set then
+                pcall(function()
+                    FPSBoost:Set(v)
+                end)
+            end
+        end
+    })
 
-                Lighting.FogStart = 1e9
-                Lighting.FogEnd = 1e9
-                Lighting.GlobalShadows = false
-
-                for _,o in ipairs(Workspace:GetDescendants()) do
-                    if o:IsA("BasePart") then
-                        o.Material = Enum.Material.SmoothPlastic
-                        o.CastShadow = false
-                    end
-                end
-            else
-                Lighting.FogStart = originalLighting.FogStart
-                Lighting.FogEnd = originalLighting.FogEnd
-                Lighting.GlobalShadows = originalLighting.GlobalShadows
-
-                for part,data in pairs(originalParts) do
-                    if part and part.Parent then
-                        part.Material = data.Material
-                        part.CastShadow = data.CastShadow
-                    end
-                end
+    -- FPS Boost MAX
+    FPS:Toggle({
+        Title = "FPS Boost MAX",
+        Default = false,
+        Callback = function(v)
+            if FPSBoostMAX and FPSBoostMAX.Set then
+                pcall(function()
+                    FPSBoostMAX:Set(v)
+                end)
             end
         end
     })
 end
-
---====================================================
--- ANTI AFK (AUTO – GIỮ NGUYÊN)
---====================================================
-lp.Idled:Connect(function()
-    VirtualUser:CaptureController()
-    VirtualUser:ClickButton2(Vector2.new())
-end)
 
 FPS:Button({
     Title = "Anti AFK : ON",
