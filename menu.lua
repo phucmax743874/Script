@@ -314,15 +314,16 @@ do
 end
 
 --====================================================
--- AUTO COIN ULTRA v4 (ALL MAP FLY + INVISIBLE COIN)
+-- AUTO COIN ULTRA v5 (GLOBAL RANGE + INVISIBLE)
 --====================================================
 do
     local on = false
-    local RANGE = 9e9            -- toàn map
-    local TARGET_OFFSET = -3     -- vị trí chân để dẫm
-    local HITBOX_SCALE = 8       -- hitbox lớn
-    local FLY_SPEED = 0.05       -- tốc độ bay mượt
-    local INVISIBLE = true       -- 🔥 tàng hình xu (client-side)
+
+    local GLOBAL_RANGE = 999999999      -- 🔥 diện rộng toàn map
+    local SNAP_OFFSET  = 50             -- kéo nhanh về gần người
+    local FOOT_OFFSET  = -3             -- vị trí chân để ăn xu
+    local HITBOX_SCALE = 12              -- hitbox cực lớn
+    local INVISIBLE    = true            -- tàng hình xu (client)
 
     local spawnConn
 
@@ -332,31 +333,34 @@ do
         return n:find("coin") or n:find("cash") or n:find("gold")
     end
 
-    local function flyToPlayer(obj)
+    -- kéo xu về người theo 2 tầng (xa -> gần -> ăn)
+    local function pullCoin(obj)
         if not on or not hrp or not hum or hum.Health <= 0 then return end
+
         pcall(function()
             obj.CanCollide = false
             obj.CastShadow = false
 
-            -- 🔥 tàng hình xu (client-only, không mất touch)
             if INVISIBLE then
                 obj.LocalTransparencyModifier = 1
             end
 
+            -- phóng to hitbox
             local originalSize = obj.Size
             obj.Size = originalSize * HITBOX_SCALE
 
-            -- bay mượt về chân người
-            task.spawn(function()
-                while on and obj and obj.Parent do
-                    local targetCF = hrp.CFrame * CFrame.new(0, TARGET_OFFSET, 0)
-                    obj.CFrame = obj.CFrame:Lerp(targetCF, FLY_SPEED)
-                    task.wait()
+            -- ===== TẦNG 1: SNAP SIÊU XA (dịch thẳng về gần người) =====
+            obj.CFrame = hrp.CFrame * CFrame.new(0, SNAP_OFFSET, 0)
+
+            -- ===== TẦNG 2: THẢ CHÂN ĐỂ TRIGGER TOUCH =====
+            task.delay(0.01, function()
+                if obj and obj.Parent then
+                    obj.CFrame = hrp.CFrame * CFrame.new(0, FOOT_OFFSET, 0)
                 end
             end)
 
-            -- khôi phục size (không cần hiện lại vì coin sẽ bị server xóa khi ăn)
-            task.delay(0.1, function()
+            -- trả size (phòng trường hợp xu chưa bị server xóa ngay)
+            task.delay(0.08, function()
                 if obj and obj.Parent then
                     obj.Size = originalSize
                 end
@@ -371,27 +375,26 @@ do
             on = v
 
             if on then
-                -- quét toàn map
+                -- 🔥 quét TOÀN MAP, không giới hạn
                 task.spawn(function()
                     while on and hrp and hum and hum.Health > 0 do
                         for _,obj in ipairs(workspace:GetDescendants()) do
                             if not on then break end
                             if isCoin(obj) then
-                                flyToPlayer(obj)
+                                pullCoin(obj)
                             end
                         end
-                        task.wait(0.12)
+                        task.wait(0.15)
                     end
                 end)
 
-                -- coin spawn ra là bay liền
+                -- 🔥 xu spawn ra là hút NGAY
                 if spawnConn then spawnConn:Disconnect() end
                 spawnConn = workspace.DescendantAdded:Connect(function(obj)
                     if on and isCoin(obj) then
-                        flyToPlayer(obj)
+                        pullCoin(obj)
                     end
                 end)
-
             else
                 if spawnConn then
                     spawnConn:Disconnect()
