@@ -101,6 +101,16 @@ Main:Button({
     end
 })
 
+Main:Button({
+    Title = "tele home",
+    Callback = function()
+        loadstring(game:HttpGet(
+            "https://raw.githubusercontent.com/phucmax743874/Script/refs/heads/main/Telehonee"
+        ))()
+    end
+})
+
+
 
 Main:Button({
     Title = "fly ",
@@ -296,7 +306,7 @@ do
                     pcall(function()
                         remote:InvokeServer()
                     end)
-                    task.wait(0.4)
+                    task.wait(0.1)
                 end
             end)
         end
@@ -304,15 +314,18 @@ do
 end
 
 --====================================================
--- AUTO COIN ULTRA (HÚT LÊN ĐẦU → THẢ XUỐNG)
+-- AUTO COIN ULTRA (REALTIME SPAWN + HITBOX)
 --====================================================
 do
     local on = false
-    local RANGE = 99999
+    local RANGE = 999999
 
-    local HEAD_OFFSET = 6     -- hút coin lên trên đầu
-    local DROP_OFFSET = -2.5  -- thả xuống gần chân
-    local HOLD_TIME = 0.02    -- thời gian giữ trên đầu (rất ngắn)
+    local HEAD_OFFSET = 6
+    local DROP_OFFSET = -2.5
+    local HOLD_TIME = 0.015
+    local HITBOX_SCALE = 10
+
+    local spawnConn
 
     local function isCoin(v)
         if not v:IsA("BasePart") then return false end
@@ -320,99 +333,288 @@ do
         return n:find("coin") or n:find("cash") or n:find("gold")
     end
 
+    local function collectCoin(obj)
+        if not on or not hrp or not hum or hum.Health <= 0 then return end
+        pcall(function()
+            obj.CanCollide = false
+            obj.CastShadow = false
+
+            local originalSize = obj.Size
+            obj.Size = originalSize * HITBOX_SCALE
+
+            -- hút lên đầu
+            obj.CFrame = hrp.CFrame * CFrame.new(0, HEAD_OFFSET, 0)
+            task.wait(HOLD_TIME)
+            -- thả xuống chân để trigger touch
+            obj.CFrame = hrp.CFrame * CFrame.new(0, DROP_OFFSET, 0)
+
+            task.delay(0.04, function()
+                if obj and obj.Parent then
+                    obj.Size = originalSize
+                end
+            end)
+        end)
+    end
+
     Main:Toggle({
-        Title = "Auto Coin (Ultra)",
+        Title = "Auto farm Coin v2",
         Default = false,
         Callback = function(v)
             on = v
-            if not on then return end
 
-            task.spawn(function()
-                while on and hrp and hum and hum.Health > 0 do
-                    for _,obj in ipairs(Workspace:GetDescendants()) do
-                        if not on then break end
-                        if isCoin(obj) then
-                            local dist = (obj.Position - hrp.Position).Magnitude
-                            if dist <= RANGE then
-                                pcall(function()
-                                    obj.CanCollide = false
-                                    obj.CastShadow = false
-
-                                    -- 1️⃣ hút coin lên đầu
-                                    obj.CFrame = hrp.CFrame * CFrame.new(0, HEAD_OFFSET, 0)
-
-                                    -- 2️⃣ giữ rất ngắn
-                                    task.wait(HOLD_TIME)
-
-                                    -- 3️⃣ thả xuống để trigger touch
-                                    obj.CFrame = hrp.CFrame * CFrame.new(0, DROP_OFFSET, 0)
-                                end)
+            -- bật: quét toàn map + bắt spawn mới
+            if on then
+                -- quét coin đã có (cực nhanh)
+                task.spawn(function()
+                    while on and hrp and hum and hum.Health > 0 do
+                        for _,obj in ipairs(workspace:GetDescendants()) do
+                            if not on then break end
+                            if isCoin(obj) then
+                                if (obj.Position - hrp.Position).Magnitude <= RANGE then
+                                    collectCoin(obj)
+                                end
                             end
                         end
+                        task.wait(0.02)
                     end
-                    task.wait(0.03)
+                end)
+
+                -- bắt coin vừa spawn ra (REALTIME)
+                if spawnConn then spawnConn:Disconnect() end
+                spawnConn = workspace.DescendantAdded:Connect(function(obj)
+                    if on and isCoin(obj) then
+                        -- xử lý ngay khi coin xuất hiện
+                        collectCoin(obj)
+                    end
+                end)
+
+            else
+                -- tắt: ngắt bắt spawn
+                if spawnConn then
+                    spawnConn:Disconnect()
+                    spawnConn = nil
                 end
-            end)
+            end
         end
     })
 end
 
 --====================================================
--- FPS BOOST (MERGED FROM bloxkidPVP) | NO FPS/PING UI
+-- FIX LAG ULTRA MEGA | LEVEL 1 -> 6 (CUMULATIVE)
+-- POWER x100 | NO INVISIBLE | NO GAME BREAK
 --====================================================
 do
-    -- load module gọn gàng
-    local function load(url)
-        local ok, res = pcall(function()
-            return loadstring(game:HttpGet(url, true))()
-        end)
-        return ok and res or nil
+    local Players = game:GetService("Players")
+    local Lighting = game:GetService("Lighting")
+    local Workspace = game:GetService("Workspace")
+    local RunService = game:GetService("RunService")
+    local Terrain = Workspace:FindFirstChildOfClass("Terrain")
+    local lp = Players.LocalPlayer
+
+    --------------------------------------------------
+    -- UTILS
+    --------------------------------------------------
+    local function forAllDescendants(fn)
+        for _,v in ipairs(Workspace:GetDescendants()) do
+            pcall(fn, v)
+        end
     end
 
-    -- load 2 module FPS gốc
-    local FPSBoost = load(
-        "https://raw.githubusercontent.com/kdo91653-cpu/bloxkidPVP-/refs/heads/main/Fps%20boss"
-    )
+    local function isCharacterPart(v)
+        local m = v
+        while m do
+            if m:IsA("Model") and m:FindFirstChildOfClass("Humanoid") then
+                return true
+            end
+            m = m.Parent
+        end
+        return false
+    end
 
-    local FPSBoostMAX = load(
-        "https://raw.githubusercontent.com/kdo91653-cpu/bloxkidPVP-/refs/heads/main/Fps%20boost%20max"
-    )
+    --------------------------------------------------
+    -- LEVEL 1 : LIGHTING + BASIC MATERIAL
+    --------------------------------------------------
+    local function Level1()
+        -- Lighting core
+        Lighting.GlobalShadows = false
+        Lighting.FogStart = 1e9
+        Lighting.FogEnd   = 1e9
+        Lighting.ClockTime = 12
+        Lighting.Brightness = 1.1
+        Lighting.OutdoorAmbient = Color3.new(1,1,1)
 
-    -- FPS Boost thường
-    FPS:Toggle({
-        Title = "FPS Boost",
-        Default = false,
-        Callback = function(v)
-            if FPSBoost and FPSBoost.Set then
-                pcall(function()
-                    FPSBoost:Set(v)
-                end)
+        -- Remove post effects
+        for _,v in ipairs(Lighting:GetChildren()) do
+            if v:IsA("BloomEffect")
+            or v:IsA("ColorCorrectionEffect")
+            or v:IsA("SunRaysEffect")
+            or v:IsA("DepthOfFieldEffect") then
+                v.Enabled = false
             end
         end
-    })
 
-    -- FPS Boost MAX
-    FPS:Toggle({
-        Title = "FPS Boost MAX",
-        Default = false,
-        Callback = function(v)
-            if FPSBoostMAX and FPSBoostMAX.Set then
-                pcall(function()
-                    FPSBoostMAX:Set(v)
-                end)
-            end
+        -- Terrain water base
+        if Terrain then
+            Terrain.WaterWaveSize = 0
+            Terrain.WaterWaveSpeed = 0
         end
-    })
-end
 
-FPS:Button({
-    Title = "Anti AFK : ON",
-    Callback = function()
-        WindUI:Notify({
-            Title = "Anti AFK",
-            Content = "Anti AFK is running",
-            Duration = 3,
-            Type = "success"
+        -- BasePart basic optimize
+        forAllDescendants(function(v)
+            if v:IsA("BasePart") then
+                v.CastShadow = false
+                v.Reflectance = 0
+                v.Material = Enum.Material.SmoothPlastic
+            end
+        end)
+    end
+
+    --------------------------------------------------
+    -- LEVEL 2 : EFFECTS / PARTICLE / TRAIL
+    --------------------------------------------------
+    local function Level2()
+        forAllDescendants(function(v)
+            if v:IsA("ParticleEmitter") then
+                v.Enabled = false
+                v.Rate = 0
+            elseif v:IsA("Trail") or v:IsA("Beam") then
+                v.Enabled = false
+            elseif v:IsA("Fire") or v:IsA("Smoke") then
+                v.Enabled = false
+            end
+        end)
+    end
+
+    --------------------------------------------------
+    -- LEVEL 3 : COLOR / WATER / EXPLOSION
+    --------------------------------------------------
+    local function Level3()
+        if Terrain then
+            Terrain.WaterReflectance = 0
+            Terrain.WaterTransparency = 0.5
+        end
+
+        forAllDescendants(function(v)
+            if v:IsA("BasePart") then
+                local c = v.Color
+                local g = (c.R + c.G + c.B) / 3
+                v.Color = Color3.new(
+                    g*0.7 + c.R*0.3,
+                    g*0.7 + c.G*0.3,
+                    g*0.7 + c.B*0.3
+                )
+            elseif v:IsA("Explosion") then
+                v.BlastPressure = 1
+                v.BlastRadius = 1
+            end
+        end)
+    end
+
+    --------------------------------------------------
+    -- LEVEL 4 : DECAL / TEXTURE / LIGHT
+    --------------------------------------------------
+    local function Level4()
+        forAllDescendants(function(v)
+            if v:IsA("Decal") or v:IsA("Texture") then
+                v.Transparency = math.clamp(v.Transparency + 0.5, 0, 0.9)
+            elseif v:IsA("PointLight")
+            or v:IsA("SpotLight")
+            or v:IsA("SurfaceLight") then
+                v.Enabled = false
+            end
+        end)
+    end
+
+    --------------------------------------------------
+    -- LEVEL 5 : MODEL / TREE / MAP DETAIL
+    --------------------------------------------------
+    local function Level5()
+        forAllDescendants(function(v)
+            if v:IsA("Model") and not isCharacterPart(v) then
+                local name = v.Name:lower()
+                if name:find("tree")
+                or name:find("leaf")
+                or name:find("bush")
+                or name:find("plant")
+                or name:find("foliage")
+                or name:find("grass") then
+                    v:Destroy()
+                end
+            elseif v:IsA("BasePart") then
+                v.Material = Enum.Material.Plastic
+            end
+        end)
+
+        Lighting.Brightness = 1
+    end
+
+    --------------------------------------------------
+    -- LEVEL 6 : REALTIME ANTI-LAG (CỰC ĐẠI)
+    --------------------------------------------------
+    local realtimeConn
+    local function Level6()
+        if Terrain then
+            Terrain.WaterTransparency = 0.85
+        end
+
+        -- optimize existing mạnh hơn nữa
+        forAllDescendants(function(v)
+            if v:IsA("BasePart") then
+                v.CastShadow = false
+                v.Reflectance = 0
+            elseif v:IsA("ParticleEmitter") then
+                v.Enabled = false
+                v.Rate = 0
+            end
+        end)
+
+        -- realtime optimize object spawn
+        if realtimeConn then realtimeConn:Disconnect() end
+        realtimeConn = Workspace.DescendantAdded:Connect(function(v)
+            task.wait()
+            pcall(function()
+                if v:IsA("BasePart") then
+                    v.CastShadow = false
+                    v.Material = Enum.Material.Plastic
+                    v.Reflectance = 0
+                elseif v:IsA("ParticleEmitter")
+                or v:IsA("Trail")
+                or v:IsA("Beam") then
+                    v.Enabled = false
+                elseif v:IsA("Decal") or v:IsA("Texture") then
+                    v.Transparency = 0.9
+                end
+            end)
+        end)
+    end
+
+    --------------------------------------------------
+    -- APPLY (CUMULATIVE)
+    --------------------------------------------------
+    local function ApplyFix(level)
+        if level >= 1 then Level1() end
+        if level >= 2 then Level2() end
+        if level >= 3 then Level3() end
+        if level >= 4 then Level4() end
+        if level >= 5 then Level5() end
+        if level >= 6 then Level6() end
+    end
+
+    --------------------------------------------------
+    -- UI BUTTONS
+    --------------------------------------------------
+    for i = 1, 6 do
+        FPS:Button({
+            Title = "Fix Lag "..i,
+            Callback = function()
+                ApplyFix(i)
+                WindUI:Notify({
+                    Title = "Fix Lag ULTRA",
+                    Content = "fix lag on "..i.." ✓",
+                    Duration = 3,
+                    Type = "success"
+                })
+            end
         })
     end
-})
+end
