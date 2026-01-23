@@ -314,16 +314,15 @@ do
 end
 
 --====================================================
--- AUTO COIN ULTRA (REALTIME SPAWN + HITBOX)
+-- AUTO COIN ULTRA v4 (ALL MAP FLY + INVISIBLE COIN)
 --====================================================
 do
     local on = false
-    local RANGE = 999999
-
-    local HEAD_OFFSET = 6
-    local DROP_OFFSET = -2.5
-    local HOLD_TIME = 0.015
-    local HITBOX_SCALE = 10
+    local RANGE = 9e9            -- toàn map
+    local TARGET_OFFSET = -3     -- vị trí chân để dẫm
+    local HITBOX_SCALE = 8       -- hitbox lớn
+    local FLY_SPEED = 0.05       -- tốc độ bay mượt
+    local INVISIBLE = true       -- 🔥 tàng hình xu (client-side)
 
     local spawnConn
 
@@ -333,22 +332,31 @@ do
         return n:find("coin") or n:find("cash") or n:find("gold")
     end
 
-    local function collectCoin(obj)
+    local function flyToPlayer(obj)
         if not on or not hrp or not hum or hum.Health <= 0 then return end
         pcall(function()
             obj.CanCollide = false
             obj.CastShadow = false
 
+            -- 🔥 tàng hình xu (client-only, không mất touch)
+            if INVISIBLE then
+                obj.LocalTransparencyModifier = 1
+            end
+
             local originalSize = obj.Size
             obj.Size = originalSize * HITBOX_SCALE
 
-            -- hút lên đầu
-            obj.CFrame = hrp.CFrame * CFrame.new(0, HEAD_OFFSET, 0)
-            task.wait(HOLD_TIME)
-            -- thả xuống chân để trigger touch
-            obj.CFrame = hrp.CFrame * CFrame.new(0, DROP_OFFSET, 0)
+            -- bay mượt về chân người
+            task.spawn(function()
+                while on and obj and obj.Parent do
+                    local targetCF = hrp.CFrame * CFrame.new(0, TARGET_OFFSET, 0)
+                    obj.CFrame = obj.CFrame:Lerp(targetCF, FLY_SPEED)
+                    task.wait()
+                end
+            end)
 
-            task.delay(0.04, function()
+            -- khôi phục size (không cần hiện lại vì coin sẽ bị server xóa khi ăn)
+            task.delay(0.1, function()
                 if obj and obj.Parent then
                     obj.Size = originalSize
                 end
@@ -357,39 +365,34 @@ do
     end
 
     Main:Toggle({
-        Title = "Auto farm Coin v2",
+        Title = "Auto Farm Coin ",
         Default = false,
         Callback = function(v)
             on = v
 
-            -- bật: quét toàn map + bắt spawn mới
             if on then
-                -- quét coin đã có (cực nhanh)
+                -- quét toàn map
                 task.spawn(function()
                     while on and hrp and hum and hum.Health > 0 do
                         for _,obj in ipairs(workspace:GetDescendants()) do
                             if not on then break end
                             if isCoin(obj) then
-                                if (obj.Position - hrp.Position).Magnitude <= RANGE then
-                                    collectCoin(obj)
-                                end
+                                flyToPlayer(obj)
                             end
                         end
-                        task.wait(0.02)
+                        task.wait(0.12)
                     end
                 end)
 
-                -- bắt coin vừa spawn ra (REALTIME)
+                -- coin spawn ra là bay liền
                 if spawnConn then spawnConn:Disconnect() end
                 spawnConn = workspace.DescendantAdded:Connect(function(obj)
                     if on and isCoin(obj) then
-                        -- xử lý ngay khi coin xuất hiện
-                        collectCoin(obj)
+                        flyToPlayer(obj)
                     end
                 end)
 
             else
-                -- tắt: ngắt bắt spawn
                 if spawnConn then
                     spawnConn:Disconnect()
                     spawnConn = nil
