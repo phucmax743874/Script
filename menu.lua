@@ -121,27 +121,32 @@ Main:Button({
 
 
 --====================================================
--- AUTO FARM BRAINROT (DEX ACCURATE | LOOP LIST)
+-- AUTO FARM BRAINROT v2 (WAVE CHECK + FOLLOW + MULTI TIER)
 --====================================================
 do
-    local RunService = game:GetService("RunService")
     local Players = game:GetService("Players")
     local lp = Players.LocalPlayer
-
     local on = false
-    local tier = "Common"
+
+    local tiers = {"Common","Rare","Legendary","Mythical","Cosmic","Secret","Celestial"}
+    local tierIndex = 1
+    local waveRange = 15
     local flySpeed = 1000
 
     -- ===== UI =====
     Main:Dropdown({
-        Title = "Brainrot Tier",
-        Values = {"Common","Celestial"},
-        Default = "Common",
-        Callback = function(v) tier = v end
+        Title = "Farm Tier List (Loop)",
+        Values = tiers,
+        Default = tiers[1],
+        Callback = function(v)
+            for i,t in ipairs(tiers) do
+                if t == v then tierIndex = i break end
+            end
+        end
     })
 
     Main:Toggle({
-        Title = "Auto Farm Brainrot (Loop)",
+        Title = "Auto Farm Brainrot (Smart)",
         Default = false,
         Callback = function(v) on = v end
     })
@@ -152,16 +157,27 @@ do
         return c, c and c:FindFirstChild("HumanoidRootPart")
     end
 
-    local function getFolder()
-        local ab = workspace:FindFirstChild("ActiveBrainrots")
-        return ab and ab:FindFirstChild(tier)
+    local function hasWaveNearby(hrp)
+        for _,v in ipairs(workspace:GetDescendants()) do
+            if v:IsA("BasePart") then
+                local n = v.Name:lower()
+                if n:find("wave") or n:find("tsunami") then
+                    if (v.Position - hrp.Position).Magnitude <= waveRange then
+                        return true
+                    end
+                end
+            end
+        end
+        return false
     end
 
-    local function getTargets()
-        local f = getFolder()
-        if not f then return {} end
+    local function getTargets(tier)
+        local ab = workspace:FindFirstChild("ActiveBrainrots")
+        local folder = ab and ab:FindFirstChild(tier)
+        if not folder then return {} end
+
         local t = {}
-        for _,br in ipairs(f:GetChildren()) do
+        for _,br in ipairs(folder:GetChildren()) do
             if br:IsA("Model")
                and br.Name == "RenderedBrainrot"
                and (br:GetAttribute("TimeLeft") or 0) > 0
@@ -172,16 +188,15 @@ do
         return t
     end
 
-    local function flyTo(cf)
-        local _, hrp = getChar()
-        if not hrp then return end
-        hrp.CFrame = cf
+    local function getPart(br)
+        return br.PrimaryPart
+            or br:FindFirstChild("Root")
+            or br:FindFirstChildWhichIsA("BasePart", true)
     end
 
-    local function holdPrompt(br)
+    local function holdE(br)
         local pp = br:FindFirstChildWhichIsA("ProximityPrompt", true)
         if not pp then return end
-        -- Fire hold E
         pcall(function()
             pp:InputHoldBegin()
             task.wait(pp.HoldDuration + 0.05)
@@ -189,41 +204,46 @@ do
         end)
     end
 
-    -- ===== Loop =====
+    -- ===== LOOP =====
     task.spawn(function()
         while true do
-            task.wait(0.15)
+            task.wait(0.1)
             if not on then continue end
 
             local char, hrp = getChar()
             if not hrp then continue end
+            local safePos = hrp.CFrame
 
-            local targets = getTargets()
-            if #targets == 0 then
-                task.wait(0.5)
-                continue
-            end
-
-            for _,br in ipairs(targets) do
+            for ti = tierIndex, #tiers do
                 if not on then break end
-                if not br or not br.Parent then continue end
-                if (br:GetAttribute("TimeLeft") or 0) <= 0 then continue end
+                local tier = tiers[ti]
+                local targets = getTargets(tier)
 
-                local part = br.PrimaryPart or br:FindFirstChild("Root") or br:FindFirstChildWhichIsA("BasePart", true)
-                if not part then continue end
+                for _,br in ipairs(targets) do
+                    if not on then break end
+                    if not br.Parent or (br:GetAttribute("TimeLeft") or 0) <= 0 then continue end
 
-                -- Fly noclip
-                flyTo(part.CFrame * CFrame.new(0,0,-2))
-                task.wait(0.1)
+                    -- ===== CHECK WAVE =====
+                    while on and hasWaveNearby(hrp) do
+                        hrp.CFrame = safePos
+                        task.wait(0.2)
+                    end
 
-                -- Hold E
-                holdPrompt(br)
+                    local part = getPart(br)
+                    if not part then continue end
 
-                -- Đợi TimeLeft về 0 / biến mất
-                local t0 = os.clock()
-                while on and br.Parent and (br:GetAttribute("TimeLeft") or 0) > 0 do
-                    if os.clock() - t0 > 3 then break end
-                    task.wait(0.1)
+                    -- ===== FOLLOW UNTIL COLLECTED =====
+                    while on and br.Parent and (br:GetAttribute("TimeLeft") or 0) > 0 do
+                        -- nếu wave tới giữa chừng → rút
+                        if hasWaveNearby(hrp) then
+                            hrp.CFrame = safePos
+                            break
+                        end
+
+                        hrp.CFrame = part.CFrame * CFrame.new(0,0,-2)
+                        holdE(br)
+                        task.wait(0.1)
+                    end
                 end
             end
         end
