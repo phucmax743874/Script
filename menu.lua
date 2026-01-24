@@ -121,166 +121,195 @@ Main:Button({
 
 
 --====================================================
--- AUTO FARM BRAINROT v4 (LINE-WAVE SAFE + HOLD E)
+-- AUTO FARM BRAINROT | SAFE FLY AI (ONE BLOCK)
 --====================================================
+
 do
+    ---------------- SERVICES ----------------
     local Players = game:GetService("Players")
     local RunService = game:GetService("RunService")
     local lp = Players.LocalPlayer
 
-    local on = false
-    local flySpeed = 1000
-    local dangerPadding = 15
-    local waveBackSafe = 5
+    ---------------- CONFIG ----------------
+    local PLAYER_SPEED = 1000
+    local MAX_WAVE_SPEED = 250
+    local CHECK_INTERVAL = 0.005
+    local DANGER_RADIUS = 15
+    local BACK_SAFE = 5
 
-    local tiers = {"Common","Rare","Legendary","Mythical","Cosmic","Secret","Celestial"}
-    local tierIndex = 1
+    ---------------- STATE ----------------
+    local FARM_ON = false
+    local CURRENT_TIER = "Common"
 
-    --================ UI =================
-    Main:Dropdown({
-        Title = "Farm Tier (Loop)",
-        Values = tiers,
-        Default = tiers[1],
-        Callback = function(v)
-            for i,t in ipairs(tiers) do
-                if t == v then tierIndex = i break end
-            end
-        end
-    })
+    ---------------- CHARACTER ----------------
+    local char, hrp, hum
+    local function bindChar(c)
+        char = c
+        hrp = c:WaitForChild("HumanoidRootPart")
+        hum = c:WaitForChild("Humanoid")
+    end
+    bindChar(lp.Character or lp.CharacterAdded:Wait())
+    lp.CharacterAdded:Connect(bindChar)
 
-    Main:Toggle({
-        Title = "Auto Farm Brainrot (REAL SAFE)",
-        Default = false,
-        Callback = function(v) on = v end
-    })
-
-    --================ HELPERS =================
-    local function getHRP()
-        local c = lp.Character
-        return c and c:FindFirstChild("HumanoidRootPart")
+    ---------------- WAVE UTILS ----------------
+    local function IsWave(v)
+        if not v:IsA("BasePart") then return false end
+        local n = v.Name:lower()
+        return n:find("wave") or n:find("song") or n:find("sóng")
     end
 
-    local function getBrainrots(tier)
-        local ab = workspace:FindFirstChild("ActiveBrainrots")
-        local f = ab and ab:FindFirstChild(tier)
-        if not f then return {} end
+    local function GetWaves()
         local t = {}
-        for _,br in ipairs(f:GetChildren()) do
-            if br:IsA("Model")
-            and br.Name == "RenderedBrainrot"
-            and (br:GetAttribute("TimeLeft") or 0) > 0 then
-                table.insert(t, br)
-            end
+        for _,v in ipairs(workspace:GetDescendants()) do
+            if IsWave(v) then table.insert(t,v) end
         end
         return t
     end
 
-    local function getPart(br)
-        return br.PrimaryPart
-            or br:FindFirstChild("Root")
-            or br:FindFirstChildWhichIsA("BasePart", true)
-    end
-
-    --================ WAVE CHECK CORE =================
-    local function isWaveInPath(hrpPos, targetPos)
-        local dir = (targetPos - hrpPos)
+    ---------------- SAFE CHECK (AI CORE) ----------------
+    local function IsDangerOnPath(fromPos, toPos)
+        local dir = (toPos - fromPos)
         local dist = dir.Magnitude
-        if dist == 0 then return false end
+        if dist <= 0 then return true end
         dir = dir.Unit
 
-        for _,w in ipairs(workspace:GetDescendants()) do
-            if w:IsA("BasePart") then
-                local n = w.Name:lower()
-                if n:find("wave") or n:find("tsunami") then
-                    -- vector từ player tới wave
-                    local rel = w.Position - hrpPos
-                    local proj = rel:Dot(dir)
+        for _,w in ipairs(GetWaves()) do
+            local rel = w.Position - fromPos
+            local proj = rel:Dot(dir)
 
-                    -- wave phải nằm TRƯỚC mặt (0 → dist + padding)
-                    if proj > 0 and proj < (dist + dangerPadding) then
-                        -- khoảng cách vuông góc tới đường bay
-                        local closest = hrpPos + dir * proj
-                        local lateral = (w.Position - closest).Magnitude
-                        if lateral <= dangerPadding then
-                            return true
-                        end
-                    end
+            if proj > 0 and proj < dist + DANGER_RADIUS then
+                local closest = fromPos + dir * proj
+                local sideDist = (w.Position - closest).Magnitude
+                if sideDist <= DANGER_RADIUS then
+                    return true
                 end
+            end
+
+            -- wave sau lưng chưa đi qua đủ xa
+            if proj < 0 and rel.Magnitude < BACK_SAFE then
+                return true
             end
         end
         return false
     end
 
-    local function waveBehindPlayer(hrpPos, safePos)
-        return (hrpPos.Position - safePos.Position).Magnitude >= waveBackSafe
+    ---------------- FLY ----------------
+    local function SetNoclip(on)
+        for _,v in ipairs(char:GetDescendants()) do
+            if v:IsA("BasePart") then
+                v.CanCollide = not on
+            end
+        end
     end
 
-    local function holdE(br)
+    local function FlyTo(pos)
+        SetNoclip(true)
+        local bv = Instance.new("BodyVelocity", hrp)
+        bv.MaxForce = Vector3.new(1e6,1e6,1e6)
+
+        while hrp and (hrp.Position - pos).Magnitude > 8 do
+            if IsDangerOnPath(hrp.Position, pos) then
+                break
+            end
+            bv.Velocity = (pos - hrp.Position).Unit * PLAYER_SPEED
+            RunService.RenderStepped:Wait()
+        end
+
+        bv:Destroy()
+        SetNoclip(false)
+    end
+
+    ---------------- BRAINROT ----------------
+    local function GetBrainrotsByTier(tier)
+        local folder = workspace:FindFirstChild("ActiveBrainrots")
+        if not folder then return {} end
+        local f = folder:FindFirstChild(tier)
+        if not f then return {} end
+
+        local list = {}
+        for _,br in ipairs(f:GetChildren()) do
+            if br:IsA("Model") and br.Name == "RenderedBrainrot"
+            and (br:GetAttribute("TimeLeft") or 0) > 0 then
+                table.insert(list, br)
+            end
+        end
+        return list
+    end
+
+    local function GetPos(br)
+        local p = br.PrimaryPart or br:FindFirstChildWhichIsA("BasePart", true)
+        return p and p.Position
+    end
+
+    local function HoldE(br)
         local pp = br:FindFirstChildWhichIsA("ProximityPrompt", true)
         if not pp then return end
-        pcall(function()
-            pp:InputHoldBegin()
-            task.wait(pp.HoldDuration + 0.05)
-            pp:InputHoldEnd()
-        end)
+        pp:InputHoldBegin()
+        task.wait(pp.HoldDuration + 0.05)
+        pp:InputHoldEnd()
     end
 
-    --================ MAIN LOOP =================
+    ---------------- MAIN LOOP ----------------
     task.spawn(function()
         while true do
-            task.wait(0.15)
-            if not on then continue end
+            task.wait(0.05)
+            if not FARM_ON or not hrp or hum.Health <= 0 then continue end
 
-            local hrp = getHRP()
-            if not hrp then continue end
             local safePos = hrp.CFrame
+            for _,br in ipairs(GetBrainrotsByTier(CURRENT_TIER)) do
+                if not FARM_ON then break end
+                local pos = GetPos(br)
+                if not pos then continue end
 
-            for ti = tierIndex, #tiers do
-                if not on then break end
-
-                for _,br in ipairs(getBrainrots(tiers[ti])) do
-                    if not on then break end
-                    if not br.Parent then continue end
-
-                    local part = getPart(br)
-                    if not part then continue end
-
-                    -- 🚨 CHECK TOÀN TUYẾN
-                    while on and isWaveInPath(hrp.Position, part.Position) do
-                        hrp.CFrame = safePos
-                        task.wait(0.2)
-                    end
-
-                    -- BAY TỚI
-                    hrp.CFrame = part.CFrame * CFrame.new(0,0,-2)
-
-                    -- 🚨 ĐANG NHẶT MÀ WAVE TỚI → RÚT
-                    if isWaveInPath(hrp.Position, part.Position) then
-                        hrp.CFrame = safePos
-                        continue
-                    end
-
-                    -- NHẶT
-                    holdE(br)
-
-                    -- ĐỢI NHẶT XONG
-                    local t0 = os.clock()
-                    while on and br.Parent and (br:GetAttribute("TimeLeft") or 0) > 0 do
-                        if isWaveInPath(hrp.Position, part.Position) then
-                            hrp.CFrame = safePos
-                            break
-                        end
-                        if os.clock() - t0 > 3 then break end
-                        task.wait(0.1)
-                    end
-
-                    -- RÚT VỀ
+                -- đợi sạch wave
+                while FARM_ON and IsDangerOnPath(hrp.Position, pos) do
                     hrp.CFrame = safePos
-                    task.wait(0.2)
+                    task.wait(CHECK_INTERVAL)
                 end
+                if not FARM_ON then break end
+
+                -- bay
+                FlyTo(pos)
+
+                -- giữ E + fail-safe
+                local start = tick()
+                while FARM_ON and tick()-start < 3 do
+                    if IsDangerOnPath(hrp.Position, pos) then
+                        hrp.CFrame = safePos
+                        break
+                    end
+                    HoldE(br)
+                    task.wait(0.05)
+                end
+
+                hrp.CFrame = safePos
+                task.wait(0.1)
             end
         end
     end)
+
+    ---------------- UI (TAB MAIN) ----------------
+    local Main = MainTab:Section({ Title = "Main Functions" })
+
+    Main:Toggle({
+        Title = "Auto Farm Brainrot ",
+        Default = false,
+        Callback = function(v)
+            FARM_ON = v
+        end
+    })
+
+    Main:Dropdown({
+        Title = "Brainrot Tier",
+        Values = {
+            "Common","Rare","Legendary",
+            "Mythical","Cosmic","Secret","Celestial"
+        },
+        Default = CURRENT_TIER,
+        Callback = function(v)
+            CURRENT_TIER = v
+        end
+    })
 end
 
 
