@@ -123,31 +123,46 @@ Main:Button({
 do
     local AF = {
         on = false,
-        rarity = "Rare",
+        tier = "Rare",
         speed = 1000,
         homeCF = nil
     }
 
     --================ UI =================
     Main:Dropdown({
-        Title = "Brainrot Rarity",
-        Values = { "Rare","Legendary","Mythical","Cosmic","Secret","Celestial" },
+        Title = "Select Object Tier",
+        Values = { "Rare", "Legendary", "Mythical", "Cosmic", "Secret", "Celestial" },
         Default = "Rare",
-        Callback = function(v) AF.rarity = v end
-    })
-
-    Main:Toggle({
-        Title = "Auto Farm Brainrot Object",
-        Default = false,
         Callback = function(v)
-            AF.on = v
-            if v and hrp then AF.homeCF = hrp.CFrame end
+            AF.tier = v
         end
     })
 
-    --================ UTILS =================
-    local RS = game:GetService("RunService")
+    Main:Toggle({
+        Title = "Auto Farm Object",
+        Default = false,
+        Callback = function(v)
+            AF.on = v
+            if v and hrp then
+                AF.homeCF = hrp.CFrame
+            end
+        end
+    })
 
+    --================ SAFE SPAWN TRACK =================
+    local spawnedAt = {}
+    workspace.DescendantAdded:Connect(function(obj)
+        if obj:IsA("Model") or obj:IsA("BasePart") then
+            spawnedAt[obj] = tick()
+        end
+    end)
+
+    local function safeToCollect(obj)
+        local t = spawnedAt[obj]
+        return t and (tick() - t > 1.2)
+    end
+
+    --================ OBJECT CHECK =================
     local function hasScanUI(obj)
         for _,v in ipairs(obj:GetDescendants()) do
             if v:IsA("TextLabel") then
@@ -160,16 +175,19 @@ do
         return false
     end
 
-    local function isBrainrotObject(obj)
+    local function isFarmObject(obj)
         if not (obj:IsA("Model") or obj:IsA("BasePart")) then return false end
-        if not obj.Name:lower():find(AF.rarity:lower()) then return false end
+        if not obj.Name:lower():find(AF.tier:lower()) then return false end
+
         local pp = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
         if not pp or not pp.Enabled then return false end
         if not hasScanUI(obj) then return false end
+        if not safeToCollect(obj) then return false end
+
         return true
     end
 
-    local function getAnyPart(obj)
+    local function getPart(obj)
         if obj:IsA("BasePart") then return obj end
         return obj:FindFirstChildWhichIsA("BasePart", true)
     end
@@ -192,19 +210,22 @@ do
 
     local function waitWavePass()
         while AF.on and waveNear(15) do task.wait(0.1) end
-        task.wait(0.3) -- wave qua sau lưng ~5 studs
+        task.wait(0.3)
     end
 
-    --================ FLY (NOCLIP) =================
+    --================ FLY NOCLIP =================
+    local RS = game:GetService("RunService")
+
     local function flyTo(pos)
-        if not hrp then return end
-        local bv = Instance.new("BodyVelocity")
+        local bv = Instance.new("BodyVelocity", hrp)
         bv.MaxForce = Vector3.new(1e9,1e9,1e9)
         bv.Parent = hrp
 
         local noclip = RS.Stepped:Connect(function()
             for _,p in ipairs(char:GetDescendants()) do
-                if p:IsA("BasePart") then p.CanCollide = false end
+                if p:IsA("BasePart") then
+                    p.CanCollide = false
+                end
             end
         end)
 
@@ -226,13 +247,13 @@ do
     --================ MAIN LOOP =================
     task.spawn(function()
         while true do
-            task.wait(0.15)
+            task.wait(0.2)
             if not AF.on or not hrp or not hum or hum.Health <= 0 then continue end
 
             for _,obj in ipairs(workspace:GetDescendants()) do
                 if not AF.on then break end
-                if isBrainrotObject(obj) then
-                    local part = getAnyPart(obj)
+                if isFarmObject(obj) then
+                    local part = getPart(obj)
                     local pp = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
                     if not part or not pp then continue end
 
@@ -242,12 +263,10 @@ do
                         waitWavePass()
                     end
 
-                    -- bay tới + giữ E
                     flyTo(part.Position + Vector3.new(0,0,-2))
                     holdPrompt(pp)
 
-                    -- sau khi nhặt
-                    task.wait(0.25) -- anti spam game
+                    task.wait(0.4) -- anti crash
                     if waveNear(15) then
                         if AF.homeCF then hrp.CFrame = AF.homeCF end
                         waitWavePass()
@@ -256,93 +275,6 @@ do
             end
         end
     end)
-end
-
-    -- ================= FLY =================
-    local function flyTo(cf)
-        local bv = Instance.new("BodyVelocity")
-        bv.MaxForce = Vector3.new(1e9,1e9,1e9)
-        bv.Parent = hrp
-
-        local conn
-        conn = game:GetService("RunService").Stepped:Connect(function()
-            for _,p in ipairs(char:GetDescendants()) do
-                if p:IsA("BasePart") then
-                    p.CanCollide = false
-                end
-            end
-        end)
-
-        while (hrp.Position - cf.Position).Magnitude > 4 and autoOn do
-            bv.Velocity = (cf.Position - hrp.Position).Unit * FARM_SPEED
-            task.wait()
-        end
-
-        if conn then conn:Disconnect() end
-        bv:Destroy()
-    end
-
-    local function holdPrompt(prompt)
-        prompt:InputHoldBegin()
-        task.wait(prompt.HoldDuration + 0.1)
-        prompt:InputHoldEnd()
-    end
-
-    -- ================= MAIN LOOP =================
-    local function startFarm()
-        originCF = hrp.CFrame
-
-        while autoOn do
-            for _,obj in ipairs(workspace:GetDescendants()) do
-                if not autoOn then break end
-
-                if isBrainrot(obj)
-                and hasTimeGui(obj)
-                and matchRarity(obj) then
-
-                    local root = obj:FindFirstChild("HumanoidRootPart")
-                    local prompt = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
-                    if not root or not prompt then continue end
-
-                    local dist = (root.Position - hrp.Position).Magnitude
-                    local checkRadius = dist + 15
-
-                    -- check wave trước khi đi
-                    if isWaveNear(checkRadius) then
-                        hrp.CFrame = originCF
-                        waitWavePass()
-                    end
-
-                    -- bay tới nhặt
-                    flyTo(root.CFrame)
-                    holdPrompt(prompt)
-
-                    -- sau khi nhặt xong
-                    if isWaveNear(15) then
-                        hrp.CFrame = originCF
-                        waitWavePass()
-                    end
-                end
-            end
-            task.wait(0.1)
-        end
-    end
-
-    -- ================= TOGGLE =================
-    Main:Toggle({
-        Title = "Auto Farm Brainrot (Smart)",
-        Default = false,
-        Callback = function(v)
-            autoOn = v
-            if v then
-                task.spawn(startFarm)
-            else
-                if originCF then
-                    hrp.CFrame = originCF
-                end
-            end
-        end
-    })
 end
 
 
