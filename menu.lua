@@ -120,6 +120,160 @@ Main:Button({
 })
 
 
+--====================================================
+-- AUTO FARM BRAINROT (SMART + ANTI WAVE)
+--====================================================
+do
+    local autoOn = false
+    local SelectedRarity = "Rare"
+    local FARM_SPEED = 1000
+
+    local originCF
+
+    -- ================= RARITY LIST =================
+    local rarities = { "Rare", "Legendary", "Mythical", "Cosmic", "Secret", "Celestial" }
+
+    Main:Dropdown({
+        Title = "Select Brainrot Rarity",
+        Values = rarities,
+        Default = "Rare",
+        Callback = function(v)
+            SelectedRarity = v
+        end
+    })
+
+    -- ================= UTILS =================
+    local function isBrainrot(model)
+        return model:IsA("Model")
+            and model:FindFirstChild("HumanoidRootPart")
+            and model:FindFirstChildWhichIsA("ProximityPrompt", true)
+    end
+
+    local function hasTimeGui(model)
+        for _,v in ipairs(model:GetDescendants()) do
+            if v:IsA("TextLabel") then
+                if v.Text:match("%ds") or v.Text:match("%d+:%d+") then
+                    return true
+                end
+            end
+        end
+        return false
+    end
+
+    local function matchRarity(model)
+        return model.Name:lower():find(SelectedRarity:lower())
+    end
+
+    -- ================= WAVE CHECK =================
+    local function isWaveNear(radius)
+        for _,v in ipairs(workspace:GetDescendants()) do
+            if v:IsA("BasePart") then
+                local name = v.Name:lower()
+                if name:find("wave") or name:find("tsunami") then
+                    if (v.Position - hrp.Position).Magnitude <= radius then
+                        return true
+                    end
+                end
+            end
+        end
+        return false
+    end
+
+    local function waitWavePass()
+        while isWaveNear(15) do
+            task.wait(0.1)
+        end
+        -- đợi wave đi qua sau lưng ~5 studs
+        task.wait(0.3)
+    end
+
+    -- ================= FLY =================
+    local function flyTo(cf)
+        local bv = Instance.new("BodyVelocity")
+        bv.MaxForce = Vector3.new(1e9,1e9,1e9)
+        bv.Parent = hrp
+
+        local conn
+        conn = game:GetService("RunService").Stepped:Connect(function()
+            for _,p in ipairs(char:GetDescendants()) do
+                if p:IsA("BasePart") then
+                    p.CanCollide = false
+                end
+            end
+        end)
+
+        while (hrp.Position - cf.Position).Magnitude > 4 and autoOn do
+            bv.Velocity = (cf.Position - hrp.Position).Unit * FARM_SPEED
+            task.wait()
+        end
+
+        if conn then conn:Disconnect() end
+        bv:Destroy()
+    end
+
+    local function holdPrompt(prompt)
+        prompt:InputHoldBegin()
+        task.wait(prompt.HoldDuration + 0.1)
+        prompt:InputHoldEnd()
+    end
+
+    -- ================= MAIN LOOP =================
+    local function startFarm()
+        originCF = hrp.CFrame
+
+        while autoOn do
+            for _,obj in ipairs(workspace:GetDescendants()) do
+                if not autoOn then break end
+
+                if isBrainrot(obj)
+                and hasTimeGui(obj)
+                and matchRarity(obj) then
+
+                    local root = obj:FindFirstChild("HumanoidRootPart")
+                    local prompt = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
+                    if not root or not prompt then continue end
+
+                    local dist = (root.Position - hrp.Position).Magnitude
+                    local checkRadius = dist + 15
+
+                    -- check wave trước khi đi
+                    if isWaveNear(checkRadius) then
+                        hrp.CFrame = originCF
+                        waitWavePass()
+                    end
+
+                    -- bay tới nhặt
+                    flyTo(root.CFrame)
+                    holdPrompt(prompt)
+
+                    -- sau khi nhặt xong
+                    if isWaveNear(15) then
+                        hrp.CFrame = originCF
+                        waitWavePass()
+                    end
+                end
+            end
+            task.wait(0.1)
+        end
+    end
+
+    -- ================= TOGGLE =================
+    Main:Toggle({
+        Title = "Auto Farm Brainrot (Smart)",
+        Default = false,
+        Callback = function(v)
+            autoOn = v
+            if v then
+                task.spawn(startFarm)
+            else
+                if originCF then
+                    hrp.CFrame = originCF
+                end
+            end
+        end
+    })
+end
+
 
 
 --====================================================
