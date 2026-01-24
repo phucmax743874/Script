@@ -121,7 +121,7 @@ Main:Button({
 
 
 --====================================================
--- AUTO FARM BRAINROT v3 (PREDICTIVE WAVE AI)
+-- AUTO FARM BRAINROT v4 (LINE-WAVE SAFE + HOLD E)
 --====================================================
 do
     local Players = game:GetService("Players")
@@ -129,42 +129,46 @@ do
     local lp = Players.LocalPlayer
 
     local on = false
-    local flySpeed = 1000 -- studs/s
-    local safetyMargin = 0.6 -- giây đệm an toàn
-    local sampleDT = 0.15
+    local flySpeed = 1000
+    local dangerPadding = 15
+    local waveBackSafe = 5
 
     local tiers = {"Common","Rare","Legendary","Mythical","Cosmic","Secret","Celestial"}
     local tierIndex = 1
 
-    -- ===== UI =====
+    --================ UI =================
     Main:Dropdown({
         Title = "Farm Tier (Loop)",
         Values = tiers,
         Default = tiers[1],
         Callback = function(v)
-            for i,t in ipairs(tiers) do if t==v then tierIndex=i break end end
+            for i,t in ipairs(tiers) do
+                if t == v then tierIndex = i break end
+            end
         end
     })
 
     Main:Toggle({
-        Title = "Auto Farm Brainrot (AI Safe)",
+        Title = "Auto Farm Brainrot (REAL SAFE)",
         Default = false,
         Callback = function(v) on = v end
     })
 
-    -- ===== Helpers =====
+    --================ HELPERS =================
     local function getHRP()
         local c = lp.Character
         return c and c:FindFirstChild("HumanoidRootPart")
     end
 
-    local function getTargets(tier)
+    local function getBrainrots(tier)
         local ab = workspace:FindFirstChild("ActiveBrainrots")
         local f = ab and ab:FindFirstChild(tier)
         if not f then return {} end
         local t = {}
         for _,br in ipairs(f:GetChildren()) do
-            if br:IsA("Model") and br.Name=="RenderedBrainrot" and (br:GetAttribute("TimeLeft") or 0) > 0 then
+            if br:IsA("Model")
+            and br.Name == "RenderedBrainrot"
+            and (br:GetAttribute("TimeLeft") or 0) > 0 then
                 table.insert(t, br)
             end
         end
@@ -172,7 +176,43 @@ do
     end
 
     local function getPart(br)
-        return br.PrimaryPart or br:FindFirstChild("Root") or br:FindFirstChildWhichIsA("BasePart", true)
+        return br.PrimaryPart
+            or br:FindFirstChild("Root")
+            or br:FindFirstChildWhichIsA("BasePart", true)
+    end
+
+    --================ WAVE CHECK CORE =================
+    local function isWaveInPath(hrpPos, targetPos)
+        local dir = (targetPos - hrpPos)
+        local dist = dir.Magnitude
+        if dist == 0 then return false end
+        dir = dir.Unit
+
+        for _,w in ipairs(workspace:GetDescendants()) do
+            if w:IsA("BasePart") then
+                local n = w.Name:lower()
+                if n:find("wave") or n:find("tsunami") then
+                    -- vector từ player tới wave
+                    local rel = w.Position - hrpPos
+                    local proj = rel:Dot(dir)
+
+                    -- wave phải nằm TRƯỚC mặt (0 → dist + padding)
+                    if proj > 0 and proj < (dist + dangerPadding) then
+                        -- khoảng cách vuông góc tới đường bay
+                        local closest = hrpPos + dir * proj
+                        local lateral = (w.Position - closest).Magnitude
+                        if lateral <= dangerPadding then
+                            return true
+                        end
+                    end
+                end
+            end
+        end
+        return false
+    end
+
+    local function waveBehindPlayer(hrpPos, safePos)
+        return (hrpPos.Position - safePos.Position).Magnitude >= waveBackSafe
     end
 
     local function holdE(br)
@@ -185,44 +225,10 @@ do
         end)
     end
 
-    -- ===== Wave Tracking =====
-    local wavePrev = {} -- [Instance] = lastPosition
-    local function getWaves()
-        local waves = {}
-        for _,v in ipairs(workspace:GetDescendants()) do
-            if v:IsA("BasePart") then
-                local n = v.Name:lower()
-                if n:find("wave") or n:find("tsunami") then
-                    table.insert(waves, v)
-                end
-            end
-        end
-        return waves
-    end
-
-    local function estimateImpactTime(hrp)
-        local minT = math.huge
-        for _,w in ipairs(getWaves()) do
-            local prev = wavePrev[w]
-            if prev then
-                local vel = (w.Position - prev) / sampleDT -- studs/s
-                local rel = hrp.Position - w.Position
-                local closing = vel:Dot(rel.Unit)
-                if closing > 1 then
-                    local dist = rel.Magnitude
-                    local t = dist / closing
-                    minT = math.min(minT, t)
-                end
-            end
-            wavePrev[w] = w.Position
-        end
-        return minT
-    end
-
-    -- ===== LOOP =====
+    --================ MAIN LOOP =================
     task.spawn(function()
         while true do
-            task.wait(sampleDT)
+            task.wait(0.15)
             if not on then continue end
 
             local hrp = getHRP()
@@ -231,45 +237,46 @@ do
 
             for ti = tierIndex, #tiers do
                 if not on then break end
-                local targets = getTargets(tiers[ti])
 
-                for _,br in ipairs(targets) do
+                for _,br in ipairs(getBrainrots(tiers[ti])) do
                     if not on then break end
-                    if not br.Parent or (br:GetAttribute("TimeLeft") or 0) <= 0 then continue end
+                    if not br.Parent then continue end
 
                     local part = getPart(br)
                     if not part then continue end
 
-                    -- ===== PREDICTIVE DECISION =====
-                    local distToTarget = (part.Position - hrp.Position).Magnitude
-                    local timeToReach = distToTarget / flySpeed
-                    local timeToImpact = estimateImpactTime(hrp)
-
-                    -- Không an toàn → đợi
-                    if timeToImpact < (timeToReach + safetyMargin) then
+                    -- 🚨 CHECK TOÀN TUYẾN
+                    while on and isWaveInPath(hrp.Position, part.Position) do
                         hrp.CFrame = safePos
-                        task.wait(0.25)
+                        task.wait(0.2)
+                    end
+
+                    -- BAY TỚI
+                    hrp.CFrame = part.CFrame * CFrame.new(0,0,-2)
+
+                    -- 🚨 ĐANG NHẶT MÀ WAVE TỚI → RÚT
+                    if isWaveInPath(hrp.Position, part.Position) then
+                        hrp.CFrame = safePos
                         continue
                     end
 
-                    -- ===== GO COLLECT =====
-                    hrp.CFrame = part.CFrame * CFrame.new(0,0,-2)
+                    -- NHẶT
                     holdE(br)
 
-                    -- Trong lúc giữ E: nếu nguy hiểm → rút
+                    -- ĐỢI NHẶT XONG
                     local t0 = os.clock()
                     while on and br.Parent and (br:GetAttribute("TimeLeft") or 0) > 0 do
-                        if estimateImpactTime(hrp) < safetyMargin then
+                        if isWaveInPath(hrp.Position, part.Position) then
                             hrp.CFrame = safePos
                             break
                         end
-                        if os.clock() - t0 > 2.5 then break end
+                        if os.clock() - t0 > 3 then break end
                         task.wait(0.1)
                     end
 
-                    -- Rút về an toàn sau mỗi lần
+                    -- RÚT VỀ
                     hrp.CFrame = safePos
-                    task.wait(0.15)
+                    task.wait(0.2)
                 end
             end
         end
