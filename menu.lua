@@ -121,11 +121,14 @@ Main:Button({
 
 
 do
-    local AF = { on=false, rarity="Rare" }
-    local FARM_SPEED = 1000
-    local originCF
+    local AF = {
+        on = false,
+        rarity = "Rare",
+        speed = 1000,
+        homeCF = nil
+    }
 
-    -- UI
+    --================ UI =================
     Main:Dropdown({
         Title = "Brainrot Rarity",
         Values = { "Rare","Legendary","Mythical","Cosmic","Secret","Celestial" },
@@ -134,38 +137,22 @@ do
     })
 
     Main:Toggle({
-        Title = "Auto Farm Brainrot",
+        Title = "Auto Farm Brainrot Object",
         Default = false,
         Callback = function(v)
             AF.on = v
-            if v and hrp then originCF = hrp.CFrame end
+            if v and hrp then AF.homeCF = hrp.CFrame end
         end
     })
 
-    -- helpers
-    local function hasTimeGui(m)
-        for _,x in ipairs(m:GetDescendants()) do
-            if x:IsA("TextLabel") and (x.Text:match("%ds") or x.Text:match("%d+:%d+")) then
-                return true
-            end
-        end
-        return false
-    end
+    --================ UTILS =================
+    local RS = game:GetService("RunService")
 
-    local function isBrainrot(m)
-        return m:IsA("Model")
-            and m.Name:lower():find(AF.rarity:lower())
-            and m:FindFirstChild("HumanoidRootPart")
-            and m:FindFirstChildWhichIsA("ProximityPrompt", true)
-            and hasTimeGui(m)
-    end
-
-    local function waveNear(radius)
-        for _,v in ipairs(workspace:GetDescendants()) do
-            if v:IsA("BasePart") then
-                local n = v.Name:lower()
-                if (n:find("wave") or n:find("tsunami"))
-                and (v.Position - hrp.Position).Magnitude <= radius then
+    local function hasScanUI(obj)
+        for _,v in ipairs(obj:GetDescendants()) do
+            if v:IsA("TextLabel") then
+                local t = v.Text:lower()
+                if t:find("quét") or t:find("scan") or t:match("%ds") or t:match("%d+:%d+") then
                     return true
                 end
             end
@@ -173,19 +160,61 @@ do
         return false
     end
 
-    local function flyTo(cf)
-        local bv = Instance.new("BodyVelocity", hrp)
+    local function isBrainrotObject(obj)
+        if not (obj:IsA("Model") or obj:IsA("BasePart")) then return false end
+        if not obj.Name:lower():find(AF.rarity:lower()) then return false end
+        local pp = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
+        if not pp or not pp.Enabled then return false end
+        if not hasScanUI(obj) then return false end
+        return true
+    end
+
+    local function getAnyPart(obj)
+        if obj:IsA("BasePart") then return obj end
+        return obj:FindFirstChildWhichIsA("BasePart", true)
+    end
+
+    --================ WAVE CHECK =================
+    local function waveNear(radius)
+        if not hrp then return false end
+        for _,v in ipairs(workspace:GetDescendants()) do
+            if v:IsA("BasePart") then
+                local n = v.Name:lower()
+                if (n:find("wave") or n:find("tsunami")) then
+                    if (v.Position - hrp.Position).Magnitude <= radius then
+                        return true
+                    end
+                end
+            end
+        end
+        return false
+    end
+
+    local function waitWavePass()
+        while AF.on and waveNear(15) do task.wait(0.1) end
+        task.wait(0.3) -- wave qua sau lưng ~5 studs
+    end
+
+    --================ FLY (NOCLIP) =================
+    local function flyTo(pos)
+        if not hrp then return end
+        local bv = Instance.new("BodyVelocity")
         bv.MaxForce = Vector3.new(1e9,1e9,1e9)
-        local noclip = game:GetService("RunService").Stepped:Connect(function()
+        bv.Parent = hrp
+
+        local noclip = RS.Stepped:Connect(function()
             for _,p in ipairs(char:GetDescendants()) do
                 if p:IsA("BasePart") then p.CanCollide = false end
             end
         end)
-        while AF.on and (hrp.Position - cf.Position).Magnitude > 4 do
-            bv.Velocity = (cf.Position - hrp.Position).Unit * FARM_SPEED
+
+        while AF.on and (hrp.Position - pos).Magnitude > 3 do
+            bv.Velocity = (pos - hrp.Position).Unit * AF.speed
             task.wait()
         end
-        noclip:Disconnect(); bv:Destroy()
+
+        noclip:Disconnect()
+        bv:Destroy()
     end
 
     local function holdPrompt(pp)
@@ -194,33 +223,34 @@ do
         pp:InputHoldEnd()
     end
 
-    -- main loop (logic thật)
+    --================ MAIN LOOP =================
     task.spawn(function()
         while true do
             task.wait(0.15)
-            if not AF.on or not hrp or not hum or hum.Health<=0 then continue end
+            if not AF.on or not hrp or not hum or hum.Health <= 0 then continue end
 
-            for _,m in ipairs(workspace:GetDescendants()) do
+            for _,obj in ipairs(workspace:GetDescendants()) do
                 if not AF.on then break end
-                if isBrainrot(m) then
-                    local root = m.HumanoidRootPart
-                    local pp = m:FindFirstChildWhichIsA("ProximityPrompt", true)
-                    if not root or not pp then continue end
+                if isBrainrotObject(obj) then
+                    local part = getAnyPart(obj)
+                    local pp = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
+                    if not part or not pp then continue end
 
-                    local checkR = (root.Position - hrp.Position).Magnitude + 15
+                    local checkR = (part.Position - hrp.Position).Magnitude + 15
                     if waveNear(checkR) then
-                        if originCF then hrp.CFrame = originCF end
-                        while waveNear(15) do task.wait(0.1) end
-                        task.wait(0.3)
+                        if AF.homeCF then hrp.CFrame = AF.homeCF end
+                        waitWavePass()
                     end
 
-                    flyTo(root.CFrame)
+                    -- bay tới + giữ E
+                    flyTo(part.Position + Vector3.new(0,0,-2))
                     holdPrompt(pp)
 
+                    -- sau khi nhặt
+                    task.wait(0.25) -- anti spam game
                     if waveNear(15) then
-                        if originCF then hrp.CFrame = originCF end
-                        while waveNear(15) do task.wait(0.1) end
-                        task.wait(0.3)
+                        if AF.homeCF then hrp.CFrame = AF.homeCF end
+                        waitWavePass()
                     end
                 end
             end
