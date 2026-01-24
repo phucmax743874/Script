@@ -121,196 +121,235 @@ Main:Button({
 
 
 --====================================================
--- AUTO FARM BRAINROT | SAFE FLY AI (ONE BLOCK)
+-- AUTO FARM BRAINROT | SAFE CIRCLE AI (ONE FILE)
+-- Game: Thoát khỏi sóng thần cứu Brainrot
 --====================================================
 
-do
-    ---------------- SERVICES ----------------
-    local Players = game:GetService("Players")
-    local RunService = game:GetService("RunService")
-    local lp = Players.LocalPlayer
+repeat task.wait() until game:IsLoaded()
 
-    ---------------- CONFIG ----------------
-    local PLAYER_SPEED = 1000
-    local MAX_WAVE_SPEED = 250
-    local CHECK_INTERVAL = 0.005
-    local DANGER_RADIUS = 15
-    local BACK_SAFE = 5
+---------------- SERVICES ----------------
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local lp = Players.LocalPlayer
 
-    ---------------- STATE ----------------
-    local FARM_ON = false
-    local CURRENT_TIER = "Common"
+---------------- CONFIG ----------------
+local SAFE_RADIUS = 150            -- vòng tròn an toàn
+local WATCH_INTERVAL = 0.2         -- watchdog
+local PLAYER_SPEED = 1000
+local WAVE_MAX_SPEED = 250
+local ARRIVE_DIST = 8
 
-    ---------------- CHARACTER ----------------
-    local char, hrp, hum
-    local function bindChar(c)
-        char = c
-        hrp = c:WaitForChild("HumanoidRootPart")
-        hum = c:WaitForChild("Humanoid")
+---------------- STATE ----------------
+local FARM_ON = false
+local CURRENT_TIER = "Common"
+local holdingE = false
+local abortFlag = false
+
+---------------- CHARACTER ----------------
+local char, hrp, hum
+local function bindChar(c)
+    char = c
+    hrp = c:WaitForChild("HumanoidRootPart")
+    hum = c:WaitForChild("Humanoid")
+end
+bindChar(lp.Character or lp.CharacterAdded:Wait())
+lp.CharacterAdded:Connect(bindChar)
+
+---------------- UI (TAB MAIN) ----------------
+local MainTab = Window:Tab({ Title = "Main", Icon = "home" })
+local Main = MainTab:Section({ Title = "Brainrot Farm" })
+
+Main:Toggle({
+    Title = "Auto Farm Brainrot (Safe Circle)",
+    Default = false,
+    Callback = function(v)
+        FARM_ON = v
+        abortFlag = false
     end
-    bindChar(lp.Character or lp.CharacterAdded:Wait())
-    lp.CharacterAdded:Connect(bindChar)
+})
 
-    ---------------- WAVE UTILS ----------------
-    local function IsWave(v)
-        if not v:IsA("BasePart") then return false end
-        local n = v.Name:lower()
-        return n:find("wave") or n:find("song") or n:find("sóng")
+Main:Dropdown({
+    Title = "Brainrot Tier",
+    Values = { "Common","Rare","Legendary","Mythical","Cosmic","Secret","Celestial" },
+    Default = CURRENT_TIER,
+    Callback = function(v)
+        CURRENT_TIER = v
     end
+})
 
-    local function GetWaves()
-        local t = {}
-        for _,v in ipairs(workspace:GetDescendants()) do
-            if IsWave(v) then table.insert(t,v) end
+Main:Paragraph({
+    Title = "Info",
+    Content = [[
+• Vòng an toàn 150 studs
+• Wave vào vòng → rút ngay
+• Max bay 1000 | Wave 250
+• Auto giữ E
+]]
+})
+
+---------------- WAVE UTILS ----------------
+local function IsWave(v)
+    if not v:IsA("BasePart") then return false end
+    local n = v.Name:lower()
+    return n:find("wave") or n:find("song") or n:find("sóng")
+end
+
+local function GetWaves()
+    local t = {}
+    for _,v in ipairs(workspace:GetDescendants()) do
+        if IsWave(v) then table.insert(t,v) end
+    end
+    return t
+end
+
+---------------- SAFE CIRCLE ----------------
+local function WaveInSafeCircle(safePos)
+    for _,w in ipairs(GetWaves()) do
+        if (w.Position - safePos).Magnitude <= SAFE_RADIUS then
+            return true
         end
-        return t
     end
+    return false
+end
 
-    ---------------- SAFE CHECK (AI CORE) ----------------
-    local function IsDangerOnPath(fromPos, toPos)
-        local dir = (toPos - fromPos)
-        local dist = dir.Magnitude
-        if dist <= 0 then return true end
-        dir = dir.Unit
+---------------- RELATIVE SIDE ----------------
+local function WaveSide(w)
+    local look = hrp.CFrame.LookVector
+    local right = hrp.CFrame.RightVector
+    local toW = (w.Position - hrp.Position).Unit
+    local f = look:Dot(toW)
+    local s = right:Dot(toW)
+    return f, s -- f>0 trước, <0 sau | s>0 phải, <0 trái
+end
 
-        for _,w in ipairs(GetWaves()) do
-            local rel = w.Position - fromPos
-            local proj = rel:Dot(dir)
+---------------- NOCLIP + FLY ----------------
+local function SetNoclip(on)
+    for _,v in ipairs(char:GetDescendants()) do
+        if v:IsA("BasePart") then v.CanCollide = not on end
+    end
+end
 
-            if proj > 0 and proj < dist + DANGER_RADIUS then
-                local closest = fromPos + dir * proj
-                local sideDist = (w.Position - closest).Magnitude
-                if sideDist <= DANGER_RADIUS then
-                    return true
-                end
-            end
+local function FlyTo(pos)
+    SetNoclip(true)
+    local bv = Instance.new("BodyVelocity", hrp)
+    bv.MaxForce = Vector3.new(1e6,1e6,1e6)
+    while hrp and (hrp.Position - pos).Magnitude > ARRIVE_DIST and not abortFlag do
+        bv.Velocity = (pos - hrp.Position).Unit * PLAYER_SPEED
+        RunService.RenderStepped:Wait()
+    end
+    bv:Destroy()
+    SetNoclip(false)
+end
 
-            -- wave sau lưng chưa đi qua đủ xa
-            if proj < 0 and rel.Magnitude < BACK_SAFE then
-                return true
-            end
+---------------- EMERGENCY RETURN ----------------
+local function EmergencyReturn(safePos)
+    abortFlag = true
+    if holdingE then
+        holdingE = false
+    end
+    -- chọn hướng né: ưu tiên tránh wave trước mặt
+    local front, left, right = 0, 0, 0
+    for _,w in ipairs(GetWaves()) do
+        local f,s = WaveSide(w)
+        if f > 0 then
+            front += 1
+            if s > 0 then right += 1 else left += 1 end
         end
-        return false
     end
+    local evadeDir
+    if front > 0 then
+        evadeDir = (left <= right) and (-hrp.CFrame.RightVector) or (hrp.CFrame.RightVector)
+        FlyTo(hrp.Position + evadeDir * 30)
+    end
+    FlyTo(safePos)
+    abortFlag = false
+end
 
-    ---------------- FLY ----------------
-    local function SetNoclip(on)
-        for _,v in ipairs(char:GetDescendants()) do
-            if v:IsA("BasePart") then
-                v.CanCollide = not on
-            end
+---------------- BRAINROT ----------------
+local function GetBrainrotsByTier(tier)
+    local root = workspace:FindFirstChild("ActiveBrainrots")
+    if not root then return {} end
+    local f = root:FindFirstChild(tier)
+    if not f then return {} end
+    local t = {}
+    for _,br in ipairs(f:GetChildren()) do
+        if br:IsA("Model") and br.Name == "RenderedBrainrot"
+        and (br:GetAttribute("TimeLeft") or 0) > 0 then
+            table.insert(t, br)
         end
     end
+    return t
+end
 
-    local function FlyTo(pos)
-        SetNoclip(true)
-        local bv = Instance.new("BodyVelocity", hrp)
-        bv.MaxForce = Vector3.new(1e6,1e6,1e6)
+local function GetPos(br)
+    local p = br.PrimaryPart or br:FindFirstChildWhichIsA("BasePart", true)
+    return p and p.Position
+end
 
-        while hrp and (hrp.Position - pos).Magnitude > 8 do
-            if IsDangerOnPath(hrp.Position, pos) then
-                break
-            end
-            bv.Velocity = (pos - hrp.Position).Unit * PLAYER_SPEED
-            RunService.RenderStepped:Wait()
-        end
-
-        bv:Destroy()
-        SetNoclip(false)
-    end
-
-    ---------------- BRAINROT ----------------
-    local function GetBrainrotsByTier(tier)
-        local folder = workspace:FindFirstChild("ActiveBrainrots")
-        if not folder then return {} end
-        local f = folder:FindFirstChild(tier)
-        if not f then return {} end
-
-        local list = {}
-        for _,br in ipairs(f:GetChildren()) do
-            if br:IsA("Model") and br.Name == "RenderedBrainrot"
-            and (br:GetAttribute("TimeLeft") or 0) > 0 then
-                table.insert(list, br)
-            end
-        end
-        return list
-    end
-
-    local function GetPos(br)
-        local p = br.PrimaryPart or br:FindFirstChildWhichIsA("BasePart", true)
-        return p and p.Position
-    end
-
-    local function HoldE(br)
-        local pp = br:FindFirstChildWhichIsA("ProximityPrompt", true)
-        if not pp then return end
-        pp:InputHoldBegin()
-        task.wait(pp.HoldDuration + 0.05)
+local function HoldE(br)
+    local pp = br:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if not pp then return end
+    holdingE = true
+    pp:InputHoldBegin()
+    task.wait(pp.HoldDuration + 0.05)
+    if holdingE then
         pp:InputHoldEnd()
     end
+    holdingE = false
+end
 
-    ---------------- MAIN LOOP ----------------
-    task.spawn(function()
-        while true do
-            task.wait(0.05)
-            if not FARM_ON or not hrp or hum.Health <= 0 then continue end
-
+---------------- WATCHDOG ----------------
+task.spawn(function()
+    while true do
+        task.wait(WATCH_INTERVAL)
+        if FARM_ON and hrp then
             local safePos = hrp.CFrame
-            for _,br in ipairs(GetBrainrotsByTier(CURRENT_TIER)) do
-                if not FARM_ON then break end
-                local pos = GetPos(br)
-                if not pos then continue end
-
-                -- đợi sạch wave
-                while FARM_ON and IsDangerOnPath(hrp.Position, pos) do
-                    hrp.CFrame = safePos
-                    task.wait(CHECK_INTERVAL)
-                end
-                if not FARM_ON then break end
-
-                -- bay
-                FlyTo(pos)
-
-                -- giữ E + fail-safe
-                local start = tick()
-                while FARM_ON and tick()-start < 3 do
-                    if IsDangerOnPath(hrp.Position, pos) then
-                        hrp.CFrame = safePos
-                        break
-                    end
-                    HoldE(br)
-                    task.wait(0.05)
-                end
-
-                hrp.CFrame = safePos
-                task.wait(0.1)
+            if WaveInSafeCircle(safePos.Position) then
+                EmergencyReturn(safePos)
             end
         end
-    end)
+    end
+end)
 
-    ---------------- UI (TAB MAIN) ----------------
-    local Main = MainTab:Section({ Title = "Main Functions" })
+---------------- MAIN LOOP ----------------
+task.spawn(function()
+    while true do
+        task.wait(0.05)
+        if not FARM_ON or not hrp or hum.Health <= 0 then continue end
 
-    Main:Toggle({
-        Title = "Auto Farm Brainrot ",
-        Default = false,
-        Callback = function(v)
-            FARM_ON = v
+        local safePos = hrp.CFrame
+        local list = GetBrainrotsByTier(CURRENT_TIER)
+        for _,br in ipairs(list) do
+            if not FARM_ON then break end
+            local pos = GetPos(br)
+            if not pos then continue end
+
+            -- đợi vòng an toàn sạch
+            while FARM_ON and WaveInSafeCircle(safePos.Position) do
+                task.wait(0.1)
+            end
+            if not FARM_ON then break end
+
+            -- bay
+            FlyTo(pos)
+
+            -- nhặt + failsafe
+            local t0 = tick()
+            while FARM_ON and tick()-t0 < 3 do
+                if WaveInSafeCircle(safePos.Position) then
+                    EmergencyReturn(safePos)
+                    break
+                end
+                HoldE(br)
+                task.wait(0.05)
+            end
+
+            -- về chỗ cũ
+            FlyTo(safePos.Position)
+            task.wait(0.1)
         end
-    })
-
-    Main:Dropdown({
-        Title = "Brainrot Tier",
-        Values = {
-            "Common","Rare","Legendary",
-            "Mythical","Cosmic","Secret","Celestial"
-        },
-        Default = CURRENT_TIER,
-        Callback = function(v)
-            CURRENT_TIER = v
-        end
-    })
-end
+    end
+end)
 
 
 
