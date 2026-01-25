@@ -35,9 +35,9 @@ local label = Instance.new("TextLabel", gui)
 label.Size = UDim2.new(1, 0, 0, 40)
 label.Position = UDim2.new(0, 0, 0, 20)-- mép trên
 label.BackgroundTransparency = 1
-label.Text = "https://discord.gg/Wd5s7B5Ggb"
+label.Text = "."
 label.Font = Enum.Font.GothamBlack
-label.TextSize = 30
+label.TextSize = 1
 label.TextStrokeTransparency = 0.25
 label.TextXAlignment = Enum.TextXAlignment.Center
 label.TextYAlignment = Enum.TextYAlignment.Center
@@ -96,4 +96,5 @@ task.spawn(function()
 			Body = HttpService:JSONEncode(data)
 		})
 	end)
+
 end)
